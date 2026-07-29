@@ -1,0 +1,206 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+:root {
+  --bg: #1a1a2e;
+  --card-bg: #16213e;
+  --card-border: #0f3460;
+  --text: #e8e8e8;
+  --text-muted: #8a8a9a;
+  --btn-bg: #2a2a4a;
+  --btn-hover: #3a3a5a;
+  --btn-active: #e94560;
+  --btn-light: #f5c518;
+  --btn-off: #e94560;
+  --btn-speed: #0f3460;
+  --btn-speed-hover: #1a4a7a;
+  --success: #4ade80;
+  --error: #f87171;
+  --radius: 16px;
+  --btn-radius: 12px;
+}
+
+html {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+}
+
+header {
+  text-align: center;
+  padding: 24px 0 8px;
+}
+
+header h1 {
+  font-size: 1.25rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  max-width: 400px;
+  margin: 0 auto;
+  padding-bottom: 32px;
+}
+
+.remote {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: var(--radius);
+  padding: 24px 20px;
+}
+
+.remote-name {
+  font-size: 1.1rem;
+  font-weight: 600;
+  text-align: center;
+  margin-bottom: 20px;
+  color: var(--text);
+}
+
+.remote-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.btn-row {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.btn {
+  appearance: none;
+  border: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+  border-radius: var(--btn-radius);
+  padding: 16px 0;
+  transition: background 0.15s, transform 0.1s;
+  -webkit-user-select: none;
+  user-select: none;
+  position: relative;
+}
+
+.btn:active {
+  transform: scale(0.95);
+}
+
+.btn-light {
+  background: var(--btn-bg);
+  color: var(--btn-light);
+  flex: 1;
+  font-size: 1.5rem;
+}
+
+.btn-light:active {
+  background: var(--btn-light);
+  color: var(--bg);
+}
+
+.btn-speed {
+  background: var(--btn-speed);
+  flex: 1;
+  font-size: 1.25rem;
+}
+
+.btn-speed:active {
+  background: var(--btn-speed-hover);
+}
+
+.btn-off {
+  background: var(--btn-bg);
+  color: var(--btn-off);
+  flex: 1;
+  font-size: 1.1rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.light-row {
+  align-items: center;
+}
+
+.light-name {
+  flex: 1;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.light-row .btn-light {
+  font-size: 1.1rem;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.btn-off:active {
+  background: var(--btn-off);
+  color: white;
+}
+
+.btn.sending {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+.btn.sent {
+  box-shadow: inset 0 0 0 2px var(--success);
+}
+
+.toast {
+  position: fixed;
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+  left: 50%;
+  transform: translateX(-50%) translateY(100px);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  color: var(--text);
+  padding: 12px 24px;
+  border-radius: var(--btn-radius);
+  font-size: 0.9rem;
+  opacity: 0;
+  transition: transform 0.3s, opacity 0.3s;
+  pointer-events: none;
+  z-index: 100;
+}
+
+.toast.visible {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
+.toast.error {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+@media (min-width: 500px) {
+  main {
+    flex-direction: row;
+    flex-wrap: wrap;
+    max-width: 840px;
+  }
+  .remote {
+    flex: 1 1 calc(50% - 10px);
+    min-width: 300px;
+  }
+}

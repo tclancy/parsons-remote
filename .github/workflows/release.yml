@@ -1,0 +1,44 @@
+name: Release
+
+# Mirrors radiofrequency's release.yml: a `v`-prefixed tag is the trigger, and
+# a single script owns the build so local and CI cannot diverge.
+#
+# NOTE for whoever cuts the first tag: this workflow fetches devices.json from
+# the newest tclancy/radiofrequency release. That repo's only tag today is
+# `0.1.0` — no `v` prefix — so its own release workflow has never fired and it
+# has zero releases. Until `git tag v0.1.0 7fde346d && git push origin v0.1.0`
+# runs there, this job fails by design rather than shipping a stale bundle.
+# See docs/decisions/001-devices-json-from-upstream-release.md.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-bundle:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # scoped to this job so we can create/upload releases
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          enable-cache: true
+      - name: Set up Python
+        run: uv python install
+      - name: Install dependencies (dev group carries the asset-integrity fence)
+        run: uv sync --frozen --all-groups
+      - name: Build and publish the bundle
+        # Delegates the test fence, devices.json fetch, tarball, checksum and
+        # `gh release` create/upload to scripts/build-release-bundle.sh — one
+        # source of truth for local (TAG=v0.1.0 scripts/build-release-bundle.sh)
+        # and CI. Idempotent on re-run for the same tag.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: bash scripts/build-release-bundle.sh --publish

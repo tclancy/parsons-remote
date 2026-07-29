@@ -1,0 +1,35 @@
+[project]
+name = "parsons-remote"
+version = "0.1.0"
+description = "Static PWA for controlling LAN devices at 22 Parsons"
+requires-python = ">=3.13"
+# The PWA has no runtime dependencies and no build step. Python here is tooling
+# only: the release-bundle scripts and the asset-integrity tests.
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.0",
+    "pytest>=8.0",
+    "pytest-cov>=6.0",
+    "radon>=6.0",
+    "ruff>=0.15",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=scripts --cov-report=term-missing --cov-fail-under=90"
+markers = [
+    "integration: shells out to scripts/build-release-bundle.sh; the script's own test fence deselects this marker so it cannot recurse into itself",
+]
+
+[tool.coverage.run]
+source = ["scripts"]
+
+[tool.ruff]
+line-length = 100
+
+# No [tool.radon] stanza on purpose. radon *does* read one, and a `cc_min` here
+# would be a second, quieter gate that can disagree with the enforcing one. The
+# single source of truth is `radon cc scripts/ -n C` — in .pre-commit-config.yaml
+# and mirrored as a CI step. Empty output is the pass condition.

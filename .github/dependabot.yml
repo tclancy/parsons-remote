@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Python here is tooling only (release scripts + asset-integrity tests), but
+  # it is still a dependency surface, so it gets the same weekly sweep.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-deps:
+        patterns: ["*"]
+
+  # This is what keeps the SHA pins in .github/workflows/ current — the version
+  # comment on each `uses:` line is what Dependabot reads and rewrites.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
