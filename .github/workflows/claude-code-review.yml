@@ -1,0 +1,80 @@
+name: Claude Code Review
+
+# Steady-state burn reduction (#320 §5):
+#   - Auto-trigger on `opened` only (was: opened + synchronize). A 10-commit PR
+#     used to fire 10 model reviews; now it fires one. Re-review on demand by
+#     leaving a comment containing `/review` (or `@claude review`).
+#   - Skip Dependabot and `chore` PRs entirely (closes #314).
+
+on:
+  pull_request:
+    types: [opened]
+  issue_comment:
+    types: [created]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number || github.event.issue.number }}
+  # MUST stay false. Concurrency cancellation happens when a run is *created*,
+  # before job-level `if` filtering — so with cancel-in-progress: true, ANY
+  # comment on the PR (including the review's own `gh pr comment`) spawned an
+  # issue_comment run in this group and cancelled the in-flight review job.
+  # Every pull_request-triggered review self-cancelled seconds after posting.
+  # The superseded-review case this once guarded (re-review on push) died when
+  # #320 dropped the `synchronize` trigger; queueing is always correct now.
+  cancel-in-progress: false
+
+jobs:
+  claude-review:
+    # Run when:
+    #   - PR opened by a non-Dependabot author with a non-`chore` title, OR
+    #   - a comment on a PR explicitly asks for `/review` or `@claude review`.
+    if: |
+      (github.event_name == 'pull_request'
+        && github.event.pull_request.user.login != 'dependabot[bot]'
+        && !startsWith(github.event.pull_request.title, 'chore'))
+      || (github.event_name == 'issue_comment'
+        && github.event.issue.pull_request != null
+        && (contains(github.event.comment.body, '/review')
+            || contains(github.event.comment.body, '@claude review')))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: read
+      id-token: write
+
+    steps:
+      - name: Resolve PR head SHA
+        id: pr
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${{ github.event_name }}" = "issue_comment" ]; then
+            number="${{ github.event.issue.number }}"
+            sha="$(gh api "repos/${{ github.repository }}/pulls/${number}" --jq .head.sha)"
+          else
+            sha="${{ github.event.pull_request.head.sha }}"
+          fi
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          ref: ${{ steps.pr.outputs.sha }}
+
+      - name: Run Claude Code Review
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1.0.183
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          allowed_bots: 'metaframework-dispatch-bot'
+          prompt: |
+            Review this pull request for:
+            - Code quality and best practices
+            - Potential bugs or issues
+            - Performance considerations
+            - Security concerns
+            - Test coverage
+
+            Use the repository's CLAUDE.md for guidance on style and conventions.
+            Be constructive and specific. Use `gh pr comment` to leave your review.
+          claude_args: '--allowed-tools "Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)"'
