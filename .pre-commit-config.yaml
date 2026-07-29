@@ -1,0 +1,39 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        # devices.json is generated upstream and copied in byte-for-byte; a
+        # whitespace rewrite here would break the byte-identity check that
+        # proves it was not hand-edited.
+        exclude: ^www/devices\.json$
+      - id: end-of-file-fixer
+        exclude: ^www/devices\.json$
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-executables-have-shebangs
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+  - repo: local
+    hooks:
+      - id: radon-complexity
+        name: Radon complexity gate (no block below C)
+        language: system
+        # `radon cc -n C` prints ONLY blocks graded C or worse, so "empty
+        # output" is the pass condition. Deliberately not the grep-based entry
+        # in metaframework/agent.md: with `--total-average` that command always
+        # emits "Average complexity: A (...)", which matches `^[A-Z]`, so the
+        # gate fires the same branch regardless of the code. Filed upstream.
+        entry: bash -c 'out=$(uvx radon cc scripts/ -n C); if [ -n "$out" ]; then echo "$out"; exit 1; fi'
+        pass_filenames: false
+        types: [python]
