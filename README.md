@@ -45,6 +45,15 @@ The homelab role consumes
 and pins the checksum in `group_vars/homelab/vars.yml` — see
 [homelab#269](https://github.com/tclancy/homelab/issues/269).
 
+> **That URL needs auth as things stand.** This repo is **private**, so an
+> anonymous `GET` of a release asset returns `404` — verified 2026-07-29. A bare
+> Ansible `get_url` on the homelab will fail at deploy time, not at PR time.
+> Two ways out, and it is Tom's call which: make this repo public (it is a
+> ceiling-fan remote with no secrets in it, and `radiofrequency` upstream is
+> already public), or have the homelab role send
+> `Authorization: token {{ vault_github_release_pat }}` from the Ansible vault —
+> or use `gh release download`, which handles auth itself.
+
 To reproduce a bundle locally:
 
 ```bash
@@ -132,9 +141,9 @@ Order of work:
   smoke test on a warm cache. This is the one bug class that a static-site repo
   can genuinely regress, so it gets a test.
 
-### Open question, answered rather than blocked on
+### Open questions, answered rather than blocked on
 
-**Can the first release be cut tonight?** No. radiofrequency's only tag is
+**1. Can the first release be cut tonight?** No. radiofrequency's only tag is
 `0.1.0` and its `release.yml` triggers on `tags: ['v*']`, so the workflow never
 fired and `GET /repos/tclancy/radiofrequency/releases` returns `[]`. There is
 nothing upstream to fetch. Steps 1/2/4/5 are complete; step 3 is wired and
@@ -143,3 +152,13 @@ unit-tested against a fake transport, but its live path is untested until
 **I have deliberately not tagged this repo** — tagging now would fire
 `release.yml` into a guaranteed failure and leave a broken v0.1.0 release in
 the way of the real one.
+
+**2. Is that the only thing standing between here and homelab#269?** No, and
+this one was not in the issue. homelab#269 will `get_url` the release asset
+from `https://github.com/tclancy/parsons-remote/releases/download/...`, but
+**this repo is private, so that URL 404s anonymously** (checked with `curl`,
+2026-07-29). It is a deploy-time failure on the homelab, invisible at PR-review
+time, and it lands on PR 3 rather than here. Options are in the Releasing
+section above; the cheapest is making this repo public, since it holds a
+ceiling-fan remote and its upstream `radiofrequency` is already public.
+**Flagged rather than decided — repo visibility is Tom's call, not an agent's.**
