@@ -33,6 +33,7 @@ from the glossary in the PR that removes it.
 - **unit** — The stable identifier for a lamp in `devices.json` (`window`, `couch`, `speaker`, `chairs`). Distinct from `label`, which is the display caption, and from `position`, which is the physical remote-button slot.
 - **upstream** — `tclancy/radiofrequency`, the repo that owns the RF profiles and generates `devices.json`. Never this repo's `origin`.
 - **www/** — The PWA source, served verbatim by Caddy with no build step. The whole contents of a release bundle.
+- **re-gate** — Re-running the `claude-review` gate against a PR's *current* head SHA by `gh pr close N && gh pr reopen N`, which fires `pull_request: reopened`. Named because the verdict binds to the SHA of the **event**, so a fix-up push leaves the previous `opened` verdict attached to a SHA that is no longer the head — and an absent verdict renders as green rather than as unreviewed. Avoid calling this "re-review" or "requesting review": posting `/review` does get the code read, but its check-run attaches to the default branch tip and never moves this PR's check state (metaframework#620). Distinct from a GitHub **review** (a human APPROVED/CHANGES_REQUESTED), which is a different surface entirely. Added by metaframework#707, which made the trigger exist here.
 
 ## Related decisions
 
