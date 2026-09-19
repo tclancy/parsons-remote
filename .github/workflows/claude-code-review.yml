@@ -8,7 +8,19 @@ name: Claude Code Review
 
 on:
   pull_request:
-    types: [opened]
+    # `reopened` added by metaframework#707. `opened` alone cannot re-gate a fix-up
+    # push, and neither can the documented fallback: a check-run attaches to the
+    # SHA of the *event*, so an `issue_comment` (`/review`) run attaches to
+    # `main`'s tip and never marks the PR head reviewed, while the `opened`
+    # verdict is simply absent from a new head — which renders as green rather
+    # than as unreviewed. `synchronize` stays OFF: it fires once per push, which
+    # is the exact burn metaframework#320 §5 cut. `reopened` costs one review per
+    # deliberate `gh pr close && gh pr reopen`, and is the only on-demand
+    # trigger an agent can fire that carries the PR head (`gh run rerun` is
+    # refused to the App token). Proofs, including the one saying this makes a
+    # reviewed head *reachable* but not *guaranteed*, are in metaframework
+    # `src/dispatch/review_gate_constraints.py`.
+    types: [opened, reopened]
   issue_comment:
     types: [created]
 
