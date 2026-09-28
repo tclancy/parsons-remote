@@ -1,10 +1,12 @@
 """Guards on `.github/workflows/claude-code-review.yml` (#9).
 
 Ported from itguy's `tests/test_review_workflow_config.py`, which was written
-after that repo's copy of this config had been wrong three times — each costing
-a red gate and ~$0.50 for zero review, and each time found by reading a failed
-run rather than by anything in the repo. This repo carried the byte-identical
-pre-fix line, so it inherits the guards before it inherits the failures.
+after that repo's copy of this config had been wrong three times. Each was found
+by reading a failed run rather than by anything in the repo, and each cost a red
+gate and ~$0.50 — three of the five measured runs produced a complete review and
+had it discarded by the action's post-check, which is worse than producing
+nothing. This repo carried the byte-identical pre-fix line, so it inherits the
+guards before it inherits the failures.
 
 Deliberately parsed as text rather than YAML: the repo declares no yaml
 dependency, and a guard that only runs where an optional import succeeded is one
@@ -13,16 +15,70 @@ that silently stops guarding.
 The cost of that choice is that `claude_args` must stay a single-line scalar.
 Reformatted to the block form upstream's own template uses (`claude_args: >-`
 over several lines) these go RED even with correct values — the safe direction,
-but the message would read as "someone deleted TodoWrite". The fixture detects
-that case and says so instead.
+but the message would read as "someone deleted TodoWrite". `extract_claude_args`
+detects that case and says so instead.
 """
 
 import re
+import textwrap
 from pathlib import Path
 
 import pytest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "claude-code-review.yml"
+
+
+def extract_claude_args(text: str) -> str:
+    """Return the `claude_args:` line from a workflow document.
+
+    Takes the document rather than reading `WORKFLOW` so its own behaviour is
+    testable against synthetic input — the comment-skipping below is the whole
+    reason this file does not just grep, and a guard on it that can only be fed
+    the real workflow is true by construction rather than by test.
+    """
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("claude_args:"):
+            continue
+        if line[:1] not in {" ", "\t"}:
+            pytest.fail(
+                "claude_args: is at column 0 — de-indented out of the step's `with:` "
+                "block, which leaves the action with no allow-list and no turn cap. "
+                "YAML still parses."
+            )
+        value = stripped[len("claude_args:") :].strip()
+        # Any `>`/`|` form, not an enumerated set: `>-`, `|+`, `>2` and
+        # `|- # note` are all block scalars, and a set-membership check waves
+        # through every spelling it forgot.
+        if not value or value[0] in {">", "|"}:
+            spelling = value or "(empty)"
+            pytest.fail(
+                f"claude_args: was reformatted to a multi-line block scalar ({spelling!r}). "
+                "These guards read a single-line scalar; fold it back, or teach "
+                "extract_claude_args to join continuation lines."
+            )
+        return stripped
+    pytest.fail("no claude_args: line in the review workflow")
+
+
+def pull_request_types(text: str) -> set[str]:
+    """The `types:` list on the `pull_request` trigger, and only that one.
+
+    Scoped deliberately. This file has two `types:` keys — `pull_request`'s and
+    `issue_comment: types: [created]` — and a bare `^\\s*types:` regex takes
+    whichever appears first, which is `pull_request`'s today only because of
+    the order the two blocks happen to be written in. Under that regex,
+    *deleting* the `types:` line passes the "synchronize is off" guard while
+    GitHub falls back to its default `[opened, synchronize, reopened]`, which
+    is the once-per-push burn metaframework#320 §5 cut. Returning an empty set
+    for an absent list is what makes that case fail the `reopened` guard.
+    """
+    block = re.search(r"^\s*pull_request:\s*$(.*?)^\s{0,2}\w", text, re.MULTILINE | re.DOTALL)
+    assert block, "no `pull_request:` trigger block in the review workflow"
+    types = re.search(r"^\s*types:\s*\[([^\]]*)\]", block.group(1), re.MULTILINE)
+    if not types:
+        return set()
+    return {t.strip() for t in types.group(1).split(",") if t.strip()}
 
 
 @pytest.fixture(scope="module")
@@ -35,25 +91,7 @@ def claude_args() -> str:
     the setting says.
     """
     assert WORKFLOW.is_file(), f"workflow not found: {WORKFLOW}"
-    for line in WORKFLOW.read_text().splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("claude_args:"):
-            continue
-        if not line.startswith(" "):
-            pytest.fail(
-                "claude_args: is at column 0 — de-indented out of the step's `with:` "
-                "block, which leaves the action with no allow-list and no turn cap. "
-                "YAML still parses."
-            )
-        value = stripped[len("claude_args:") :].strip()
-        if value in {">-", ">", "|", "|-", ""}:
-            pytest.fail(
-                f"claude_args: was reformatted to a multi-line block scalar ({value!r}). "
-                "These guards read a single-line scalar; fold it back, or teach the "
-                "fixture to join continuation lines."
-            )
-        return stripped
-    pytest.fail("no claude_args: line in the review workflow")
+    return extract_claude_args(WORKFLOW.read_text())
 
 
 class TestTheReviewGateIsBudgetedForRealReviews:
@@ -90,9 +128,15 @@ class TestTheReviewGateIsBudgetedForRealReviews:
     def test_bot_authored_prs_are_still_reviewable(self):
         """The action blocks bot actors by default. Nearly every PR in this repo
         is opened by metaframework-dispatch-bot, so losing this line makes the
-        gate silently skip almost everything while staying green."""
+        gate silently skip almost everything while staying green.
+
+        Anchored to the quoted *value*: `.*metaframework-dispatch-bot` also
+        matches `allowed_bots: 'nobody'  # was metaframework-dispatch-bot`.
+        """
         body = WORKFLOW.read_text()
-        assert re.search(r"^\s*allowed_bots:\s*.*metaframework-dispatch-bot", body, re.MULTILINE)
+        assert re.search(
+            r"^\s*allowed_bots:\s*['\"]metaframework-dispatch-bot['\"]\s*$", body, re.MULTILINE
+        )
 
     def test_track_progress_is_still_on(self):
         """`--allowed-tools` only FILTERS registered MCP servers; it does not
@@ -103,16 +147,23 @@ class TestTheReviewGateIsBudgetedForRealReviews:
 
 
 class TestTheGateCanStillFireAtAll:
-    """Every trigger this gate has. Measured 2026-09-28, this repo's review
-    workflow has run 12 times and produced **zero** reviews: 11 filtered out by
-    the `if:` below (Dependabot and `chore` PRs, by design) and one — PR #14,
-    head 69699fc — stopped by the action's anti-tamper validation because that
-    PR edited this file. That last one concluded **`success` in 1.6 seconds**.
+    """Every trigger this gate has. Measured 2026-09-28 over all 14 recorded
+    runs of this workflow, it has produced **zero** reviews:
+
+    - **11 `skipped`** — filtered out by the job's `if:`. Ten are Dependabot or
+      `chore` pull requests; one is an `issue_comment` that did not contain
+      `/review`.
+    - **2 `success`** — runs 30537851656 (PR #3) and 35360053668 (PR #14), both
+      stopped by the action's anti-tamper validation because both PRs edited
+      this file. The second concluded `success` in **1.6 seconds**.
+    - **1 `failure`** — run 30432219327 (PR #2), `steps=0` ten seconds after
+      spawn: the runner was never provisioned, the Actions minute cap.
 
     So the settings the class above pins have never been exercised here, and
-    these guards cannot be validated by "the gate went green once". Pin the
-    triggers instead: a dropped trigger is the one failure mode that would keep
-    that record at zero forever while looking exactly like it does now.
+    these guards cannot be validated by "the gate went green once" — two of the
+    three greens on record are a gate that did nothing. Pin the triggers
+    instead: a dropped trigger is the one failure mode that would keep that
+    record at zero forever while looking exactly like it does now.
     """
 
     def test_reopened_is_a_trigger(self):
@@ -121,18 +172,17 @@ class TestTheGateCanStillFireAtAll:
         `issue_comment` run lands its verdict on the default branch tip. An
         absent verdict on the real head renders as green, not as unreviewed.
         See `re-gate` in GLOSSARY.md."""
-        body = WORKFLOW.read_text()
-        types = re.search(r"^\s*types:\s*\[([^\]]*)\]", body, re.MULTILINE)
-        assert types, "no `types:` list on the pull_request trigger"
-        assert "reopened" in {t.strip() for t in types.group(1).split(",")}
+        assert "reopened" in pull_request_types(WORKFLOW.read_text())
 
     def test_synchronize_is_still_off(self):
         """Deliberately absent: it fires once per push, which is the exact burn
         metaframework#320 §5 cut. Re-gating is a deliberate close/reopen."""
-        body = WORKFLOW.read_text()
-        types = re.search(r"^\s*types:\s*\[([^\]]*)\]", body, re.MULTILINE)
-        assert types
-        assert "synchronize" not in {t.strip() for t in types.group(1).split(",")}
+        types = pull_request_types(WORKFLOW.read_text())
+        assert types, (
+            "no `types:` list on the pull_request trigger — GitHub then defaults "
+            "to [opened, synchronize, reopened], which turns synchronize back on"
+        )
+        assert "synchronize" not in types
 
     def test_cancel_in_progress_is_off(self):
         """MUST stay false. Cancellation happens when a run is *created*, before
@@ -143,11 +193,25 @@ class TestTheGateCanStillFireAtAll:
         assert re.search(r"^\s*cancel-in-progress:\s*false\s*$", body, re.MULTILINE)
 
 
-class TestTheGuardReadsTheSettingNotTheComment:
+class TestTheGuardsReadTheSettingNotTheComment:
     """A guard aimed at the wrong text reads exactly like a passing one."""
 
-    def test_the_fixture_excludes_comment_lines(self, claude_args: str):
-        assert not claude_args.lstrip().startswith("#")
+    def test_a_commented_out_claude_args_is_not_returned(self):
+        """The property `extract_claude_args` exists for, tested against input
+        that can actually express the failure. Asserting it on the real
+        workflow instead is true by construction — the function only ever
+        returns a line that already passed the `claude_args:` prefix test — so
+        it would pass for any workflow content whatsoever.
+        """
+        document = textwrap.dedent("""\
+            with:
+              # claude_args: '--allowed-tools "TodoWrite"' --max-turns 999
+              claude_args: '--allowed-tools "Real"' --max-turns 40
+        """)
+        assert (
+            extract_claude_args(document)
+            == "claude_args: '--allowed-tools \"Real\"' --max-turns 40"
+        )
 
     def test_the_comment_block_alone_would_satisfy_a_naive_grep(self):
         """If this fails, the prose moved and the fixture's reason for existing
