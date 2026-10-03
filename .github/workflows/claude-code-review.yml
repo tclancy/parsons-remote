@@ -112,4 +112,56 @@ jobs:
           # silently no-op. --max-turns bounds the blast radius: a denied tool
           # otherwise retries to the turn limit, burning minutes to produce
           # nothing, and this account has exhausted its allowance two months running.
-          claude_args: '--allowed-tools "mcp__github_inline_comment__create_inline_comment,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --max-turns 25'
+          #
+          # --max-turns 40 is a MEASUREMENT, and it is ITGUY'S, not this repo's.
+          # This file carried a byte-identical copy of the pre-fix line, so the
+          # raise is prophylactic here; the numbers below are the evidence that
+          # 25 is wrong, taken from itguy's streamed result JSON under that cap
+          # (itguy #211, fixed in itguy PR #220):
+          #
+          #   run 34088207877  #212  26 turns / 10 denials  $0.49  error_max_turns
+          #   run 34088470544  #212  27 turns / 10 denials         success
+          #   run 34127739755  #216  32 turns /  7 denials  $0.59  success
+          #   run 34171629175  #219  26 turns /  9 denials  $0.55  error_max_turns
+          #   run 34171815438  #219  26 turns /  6 denials         success
+          #
+          # Every one is a RED check, and that is the point: three of the five
+          # completed a real review and were failed anyway, by the action's
+          # post-check ("reported a successful result after 32 turns, exceeding
+          # the configured maximum of 25"). The cap was not protecting against
+          # runaway reviews, it was discarding finished ones. 32 is the measured
+          # requirement; 40 is that plus headroom, and matches the five fleet
+          # repos already there (canvasoptimizer, homelab, itguy, metaframework,
+          # sandy). This repo was the last one on 25.
+          #
+          # TodoWrite is allow-listed for fleet consistency and because it is
+          # harmless -- an in-session scratchpad with no filesystem or GitHub
+          # write surface. It is deliberately NOT claimed as the cause of the
+          # 6-10 denials per run:
+          #
+          #   - The streamed log records the denial COUNT and never which tool
+          #     was denied. `grep -c TodoWrite` over two full itguy run logs is 0.
+          #   - Three of the five runs above ticked their checklists COMPLETELY
+          #     with TodoWrite absent from this list, so "the model is denied the
+          #     means to update its checklist" is refuted by the evidence set.
+          #
+          # So: the cap raise stands on measurement, the allow-list addition
+          # stands on fleet consistency, and what is being denied 6-10 times a
+          # run is still unidentified.
+          #
+          # Both settings are pinned by tests/test_review_workflow_config.py,
+          # which is the only thing here that can fire. Measured 2026-09-28 over
+          # all 14 recorded runs of this workflow, it has produced ZERO reviews:
+          #
+          #   11 skipped   filtered out by the `if:` above -- ten Dependabot or
+          #                `chore` PRs, one issue_comment without `/review`
+          #    2 success   runs 30537851656 (PR #3) and 35360053668 (PR #14),
+          #                both stopped by the action's anti-tamper validation
+          #                because both PRs edited this file. The second
+          #                concluded `success` in 1.6 seconds.
+          #    1 failure   run 30432219327 (PR #2), steps=0 ten seconds after
+          #                spawn -- the runner was never provisioned.
+          #
+          # Two of the three greens on record are a gate that did nothing, so a
+          # gate that has never run cannot regression-test its own config.
+          claude_args: '--allowed-tools "mcp__github_inline_comment__create_inline_comment,TodoWrite,Bash(gh issue view:*),Bash(gh search:*),Bash(gh issue list:*),Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh pr list:*)" --max-turns 40'
