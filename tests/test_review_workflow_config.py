@@ -88,6 +88,22 @@ MECHANISM_PHRASES = (
     # grep string once, because the reviewer read the paragraph telling it to.
     "**Do not grep the whole log for that string.**",
     '`"num_turns"` is the cheapest positive test',
+    # The `conclusion` snippet is useless without an `id:` on the action step,
+    # and worse than useless: with no id it is `''` on every run, so a copied
+    # guard fails real reviews too. The review caught the prose implying the
+    # id rather than showing it.
+    # Whitespace-collapsed, because this is matched through `prose()` and the
+    # snippet aligns the comment with spaces.
+    "id: review # <- this line is load-bearing",
+)
+
+#: Headings that announce how many bullets follow them. A count in prose
+#: cannot be derived from anything, so it drifts the moment a bullet is added
+#: -- which is exactly what happened to both of these in review, in a document
+#: whose whole subject is one number copied into four places.
+BULLET_COUNT_PHRASES = (
+    ("Three consequences worth being precise about", 3),
+    ("Three things follow, two of which earlier write-ups", 3),
 )
 
 
@@ -382,9 +398,12 @@ class TestTheWorkflowValidationSkipStaysDocumented:
         A guard on the transcription alone would happily pin three numbers that
         refute the sentence they are cited for.
         """
-        assert min(SKIP_DURATIONS_MS.values()) >= 1_620 - 10
+        # 1,616 ms is the fastest, and it rounds to 1.62 s — so the lower
+        # bound is the smallest value the document's own wording admits, not
+        # 1,620 with a fudge subtracted from it.
+        assert min(SKIP_DURATIONS_MS.values()) >= 1_615
         assert max(SKIP_DURATIONS_MS.values()) <= 1_700
-        assert "1.62-1.70 s" in AGENT_DOC.read_text().replace("\u2013", "-")
+        assert "1.62-1.70 s" in prose(AGENT_DOC).replace("\u2013", "-")
 
     @pytest.mark.parametrize("phrase", GUIDANCE_PHRASES)
     def test_the_guidance_survives(self, phrase: str):
@@ -425,6 +444,36 @@ class TestTheWorkflowValidationSkipStaysDocumented:
             "the zero-reviews claim is no longer bounded — it was falsified by "
             f"run {FIRST_REAL_REVIEW_RUN} and must stay in the past tense"
         )
+
+    @pytest.mark.parametrize("phrase,expected", BULLET_COUNT_PHRASES)
+    def test_a_heading_that_counts_its_bullets_still_counts_right(self, phrase: str, expected: int):
+        """Counts the bullets under the heading, rather than pinning the word.
+
+        Pinning the phrase alone would hold the number steady while a fourth
+        bullet appeared beneath it -- the same drift this document exists to
+        complain about, which review found twice in my own prose. So the
+        assertion reads the structure and compares it against the word.
+        """
+        assert phrase in prose(AGENT_DOC), f"heading moved or was reworded: {phrase!r}"
+        # Raw text from here on: the count comes from the line structure, which
+        # `prose()` destroys. So the heading has to sit on a single line, and
+        # the assertion below is what tells a future editor that when they
+        # reflow it.
+        body = AGENT_DOC.read_text()
+        assert phrase in body, (
+            f"{phrase!r} is in the document but wrapped across lines, so the "
+            "bullet count below cannot be anchored. Keep it on one line."
+        )
+        after = body.split(phrase, 1)[1]
+        # The list ends at the first blank line that is not inside it: bullets
+        # here are "- " at column 0, continuation lines are indented.
+        bullets = 0
+        for line in after.splitlines():
+            if line.startswith("- "):
+                bullets += 1
+            elif line and not line.startswith(" ") and bullets:
+                break
+        assert bullets == expected, f"{phrase!r} announces {expected}, found {bullets}"
 
     def test_the_stale_workflow_comment_is_acknowledged(self):
         """The workflow's own comment block still carries the 14-run reading.

@@ -30,8 +30,8 @@ this repo sets.
    skip`, and **returns**. The job then completes with no error, so the check
    is green.
 
-It exists so a PR cannot grant itself a laxer gate by editing the gate. Two
-consequences worth being precise about:
+It exists so a PR cannot grant itself a laxer gate by editing the gate.
+Three consequences worth being precise about:
 
 - **It is scoped to the workflow the run came from**, which is what the error
   code's name and the OIDC `job_workflow_ref` claim imply — so editing
@@ -96,7 +96,9 @@ knowing, because the "if they differ" framing above does not cover it.
 
 ### Every instance in this repo, re-derived 2026-10-22
 
-All 25 recorded runs of this workflow, read from the Actions API:
+The first 25 recorded runs of this workflow — everything up to and including
+`39570227467`, i.e. every run before the one on this file's own PR — read from
+the Actions API:
 
 | conclusion | count | what it was |
 |---|---|---|
@@ -112,7 +114,7 @@ Each green, and the PR that caused it by editing `claude-code-review.yml`:
 | [`35360053668`](https://github.com/tclancy/parsons-remote/actions/runs/35360053668) | [#14](https://github.com/tclancy/parsons-remote/pull/14) | 11 s | 4 s | 1,616 ms |
 | [`36484572525`](https://github.com/tclancy/parsons-remote/actions/runs/36484572525) | [#16](https://github.com/tclancy/parsons-remote/pull/16) | 9 s | 5 s | 1,625 ms |
 
-Two things follow that earlier write-ups of this got wrong:
+Three things follow, two of which earlier write-ups of this got wrong:
 
 - **~1.6 s is the signature of this failure mode, not a quirk of one run.**
   Previous notes attributed "concluded `success` in 1.6 seconds" to run
@@ -123,17 +125,26 @@ Two things follow that earlier write-ups of this got wrong:
   the run's or the step's, which are the columns beside it. Compare like with
   like.
 - **This repo produced zero reviews for its first 25 runs.** Not "has not hit
-  the failure yet" — through run `39570227467` the gate had never once run to
-  completion, which was independently checkable: `/pulls/comments` empty
+  the failure yet" — across exactly the 25 runs tabled above the gate had
+  never once run to completion, which was independently checkable:
+  `/pulls/comments` empty
   repo-wide and `/pulls/N/reviews` empty for every PR. So no setting in that
   workflow had ever been exercised here, and "the gate went green" was not
   evidence that any of it worked. `tests/test_review_workflow_config.py`
   exists for that reason: the guards were the only thing standing in for a
   gate that had never fired.
 - **Run `39897838521`, on the PR that added this file, is the first real
-  review.** 42 s, 4 turns, $0.138, a posted verdict. It is also the proof #9
-  asked for: PR #20 edited the workflow and could not be reviewed, so the
-  *next* PR was the first test of whether the edit worked. It did.
+  review.** 4 turns, $0.138, a posted verdict. It is also the proof #9 asked
+  for: PR #20 edited the workflow and could not be reviewed, so the *next* PR
+  was the first test of whether the edit worked. It did.
+
+  That run reports **four different durations**, which is the "compare like
+  with like" point above biting immediately: the job 50 s, the `Run Claude
+  Code Review` step 44 s, the action's nested `run` step `duration_ms=42000`,
+  and the posted comment's own *"finished in 24s"*, which is the agent's
+  elapsed time inside the action. They are not inconsistent; they are nested.
+  The skip table's right-hand column is the third of those, so compare against
+  that one.
 
 ### What to do instead
 
@@ -148,10 +159,18 @@ A PR that touches `.github/workflows/claude-code-review.yml`:
    edit worked.
 3. **Should not carry unrelated changes.** Anything bundled in rides through
    unreviewed under the same green check.
-4. **Could make the green honest, and that is worth doing separately.** Give
-   the action step an `id:` and fail the job when it produced no verdict:
+4. **Could make the green honest, and that is worth doing separately.** Add
+   `id: review` to the existing `anthropics/claude-code-action` step — it has
+   none today, and without it `steps.review.outputs.conclusion` is `''` on
+   *every* run, so the guard below would fail real reviews too — then fail the
+   job when the step produced no verdict:
 
    ```yaml
+         - name: Review
+           id: review                    # <- this line is load-bearing
+           uses: anthropics/claude-code-action@...
+           with: ...
+
          - name: A green check must mean a review happened
            if: steps.review.outputs.conclusion == ''
            run: |
