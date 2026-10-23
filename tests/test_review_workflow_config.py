@@ -26,6 +26,85 @@ from pathlib import Path
 import pytest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "claude-code-review.yml"
+AGENT_DOC = Path(__file__).resolve().parents[1] / "CLAUDE.md"
+GLOSSARY = Path(__file__).resolve().parents[1] / "GLOSSARY.md"
+
+#: Every run of this workflow that concluded `success` without reviewing
+#: anything, because the action found the branch copy of the workflow differed
+#: from the default branch's. Re-derived from the Actions API on 2026-10-22,
+#: all 25 runs: these three are the *only* greens, and there are no real
+#: reviews. `CLAUDE.md` carries the full table; the guard below asserts the two
+#: stay in step, so adding a fourth instance cannot leave the prose behind.
+WORKFLOW_VALIDATION_SKIP_RUNS = {
+    "30537851656": 3,  # claude/review-gate-inline-comments, 1,695 ms
+    "35360053668": 14,  # claude/707-reopened-trigger,        1,616 ms
+    "36484572525": 16,  # claude/9-review-turn-budget,        1,625 ms
+}
+
+#: The action's own log line, and therefore the thing to grep for. Shared
+#: between the guard and the prose for the same reason as the run IDs.
+VALIDATION_SKIP_LOG_LINE = "Exiting due to workflow validation skip"
+
+#: The first run of this workflow that actually reviewed anything, 2026-10-23.
+#: Kept beside the skip list because it is the control for it: every claim
+#: about what a skip looks like is only meaningful against a run that did not
+#: skip. 42 s, 4 turns, $0.138, `duration_ms=42000`.
+FIRST_REAL_REVIEW_RUN = "39897838521"
+
+#: The nested `run` step's `duration_ms` for each skip, from the
+#: `##[end-action ...]` line of each run's log. These are what make "~1.6 s is
+#: the signature of this failure mode, not a quirk of one run" a checkable
+#: claim rather than an assertion: the spread is 79 ms across 14 months.
+SKIP_DURATIONS_MS = {"30537851656": 1695, "35360053668": 1616, "36484572525": 1625}
+
+#: Every conclusion the 25 runs produced, re-derived 2026-10-22. Shared with
+#: the table in `CLAUDE.md` so a count cannot drift in prose: a review round
+#: found that raising `skipped` from 21 to 99 in the document left the suite
+#: green, because nothing read that cell.
+RUN_TOTALS = {"skipped": 21, "success": len(WORKFLOW_VALIDATION_SKIP_RUNS), "failure": 1}
+
+#: The three instructions scope item 3 of #9 actually asked to be written down.
+#: Guarded because the run table was not the deliverable -- this is. A review
+#: round deleted the whole `### What to do instead` section, and separately
+#: inverted all three bullets, with the suite green both times.
+GUIDANCE_PHRASES = (
+    "Gets Tom's explicit approval",
+    "Is proved by the *next* PR",
+    "Should not carry unrelated changes",
+)
+
+#: The claim the document's conclusion rests on. Inverting it to "reviews
+#: normally and reports `failure`" also passed a green suite.
+MECHANISM_PHRASES = (
+    # Not the action comparing two copies, which is what an earlier draft said.
+    "The validation is **server-side",
+    "workflow_not_found_on_default_branch",
+    # And the green IS distinguishable without logs, which that draft denied.
+    "`conclusion` output is **empty**",
+    # Which makes the behaviour auth-mode-dependent rather than absolute.
+    "Supplying `github_token` would bypass it entirely",
+    # And the recipe this document gives must not be the one that misfires on
+    # this document. Run 39897838521 is a real review whose log matches the
+    # grep string once, because the reviewer read the paragraph telling it to.
+    "**Do not grep the whole log for that string.**",
+    '`"num_turns"` is the cheapest positive test',
+    # The `conclusion` snippet is useless without an `id:` on the action step,
+    # and worse than useless: with no id it is `''` on every run, so a copied
+    # guard fails real reviews too. The review caught the prose implying the
+    # id rather than showing it.
+    # Whitespace-collapsed, because this is matched through `prose()` and the
+    # snippet aligns the comment with spaces.
+    "id: review # <- this line is load-bearing",
+)
+
+#: Headings that announce how many bullets follow them. A count in prose
+#: cannot be derived from anything, so it drifts the moment a bullet is added
+#: -- which is exactly what happened to both of these in review, in a document
+#: whose whole subject is one number copied into four places.
+BULLET_COUNT_PHRASES = (
+    ("Three consequences worth being precise about", 3),
+    ("Three things follow, two of which earlier write-ups", 3),
+)
 
 
 def extract_claude_args(text: str) -> str:
@@ -59,6 +138,18 @@ def extract_claude_args(text: str) -> str:
             )
         return stripped
     pytest.fail("no claude_args: line in the review workflow")
+
+
+def prose(path: Path) -> str:
+    """Return ``path``'s text with every run of whitespace collapsed to a space.
+
+    Prose guards have to read it this way. The phrases below are sentences a
+    human wrote and a human will reflow: ``"is the first real review"`` sat
+    across a line break with a two-space indent, and an exact-match guard on it
+    went red for a wrap rather than for a change in meaning. Table cells and
+    run IDs are matched exactly, because those cannot wrap.
+    """
+    return " ".join(path.read_text().split())
 
 
 def pull_request_types(text: str) -> set[str]:
@@ -147,23 +238,23 @@ class TestTheReviewGateIsBudgetedForRealReviews:
 
 
 class TestTheGateCanStillFireAtAll:
-    """Every trigger this gate has. Measured 2026-09-28 over all 14 recorded
-    runs of this workflow, it has produced **zero** reviews:
+    """Every trigger this gate has. Re-measured 2026-10-22 over all 25 recorded
+    runs of this workflow, it has still produced **zero** reviews:
 
-    - **11 `skipped`** — filtered out by the job's `if:`. Ten are Dependabot or
-      `chore` pull requests; one is an `issue_comment` that did not contain
-      `/review`.
-    - **2 `success`** — runs 30537851656 (PR #3) and 35360053668 (PR #14), both
-      stopped by the action's anti-tamper validation because both PRs edited
-      this file. The second concluded `success` in **1.6 seconds**.
+    - **21 `skipped`** — filtered out by the job's `if:`: Dependabot bumps,
+      `chore` pull requests, and `issue_comment` runs with no `/review`.
+    - **3 `success`** — every one a `workflow validation skip`
+      (`WORKFLOW_VALIDATION_SKIP_RUNS` below), each on a PR that edited this
+      file. Not two: the 2026-09-28 reading of this predates run 36484572525,
+      which is the run on PR #16 — the PR that added this very file.
     - **1 `failure`** — run 30432219327 (PR #2), `steps=0` ten seconds after
       spawn: the runner was never provisioned, the Actions minute cap.
 
     So the settings the class above pins have never been exercised here, and
-    these guards cannot be validated by "the gate went green once" — two of the
-    three greens on record are a gate that did nothing. Pin the triggers
-    instead: a dropped trigger is the one failure mode that would keep that
-    record at zero forever while looking exactly like it does now.
+    these guards cannot be validated by "the gate went green once" — *all three*
+    greens on record are a gate that did nothing. Pin the triggers instead: a
+    dropped trigger is the one failure mode that would keep that record at zero
+    forever while looking exactly like it does now.
     """
 
     def test_reopened_is_a_trigger(self):
@@ -221,3 +312,198 @@ class TestTheGuardsReadTheSettingNotTheComment:
         ]
         assert any("TodoWrite" in line for line in comments)
         assert any("--max-turns" in line for line in comments)
+
+
+class TestTheWorkflowValidationSkipStaysDocumented:
+    """Scope item 3 of #9.
+
+    The gate cannot review a PR that edits it, so the only thing standing
+    between that fact and the next person reading a 1.6-second green check is
+    prose — and prose with nothing asserting it rots. These guards share
+    `WORKFLOW_VALIDATION_SKIP_RUNS` and `VALIDATION_SKIP_LOG_LINE` with the
+    document rather than restating them, so a fourth instance of the failure
+    cannot be recorded in one place and not the other.
+
+    Deliberately NOT a comment block inside `claude-code-review.yml`: writing
+    it there would make the PR that adds it unreviewable, which is the rule
+    defeating its own documentation. These files are reviewable, which is the
+    whole reason the note lives in them.
+    """
+
+    def test_the_agent_doc_exists(self):
+        assert AGENT_DOC.is_file(), f"CLAUDE.md not found: {AGENT_DOC}"
+
+    def test_the_agent_doc_names_the_log_line_to_grep_for(self):
+        """A reader who has the green check needs the string, not a paraphrase."""
+        assert VALIDATION_SKIP_LOG_LINE in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("run_id", sorted(WORKFLOW_VALIDATION_SKIP_RUNS))
+    def test_every_known_instance_is_in_the_agent_doc(self, run_id: str):
+        """Parametrised over the constant, not over a hand-typed list.
+
+        A single `assert all(...)` would pass a new entry the document never
+        gained, as long as the old ones were still there — the aggregate hides
+        which member failed. One case per run is what makes the fourth
+        instance fail loudly.
+        """
+        assert run_id in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("run_id,pr", sorted(WORKFLOW_VALIDATION_SKIP_RUNS.items()))
+    def test_each_instance_is_attributed_to_its_pull_request(self, run_id: str, pr: int):
+        """Run ID *and* PR number, because the two have been mismatched before.
+
+        Membership is not correspondence: asserting both strings appear
+        somewhere in the file would pass a table that paired run
+        30537851656 with PR #16. Anchored to the table row so the pairing is
+        what is checked.
+        """
+        rows = [line for line in AGENT_DOC.read_text().splitlines() if run_id in line]
+        assert rows, f"no line mentions run {run_id}"
+        # `/pull/3` is a prefix of `/pull/31`, so a bare substring test passes
+        # a row that pairs this run with PR #31. The repo is at PR #22, so that
+        # was weeks from being a live false pass rather than a hypothetical.
+        assert any(re.search(rf"/pull/{pr}\)", row) for row in rows), (
+            f"run {run_id} is documented, but not against PR #{pr}: {rows}"
+        )
+
+    @pytest.mark.parametrize("conclusion,count", sorted(RUN_TOTALS.items()))
+    def test_every_run_total_is_read_out_of_the_table(self, conclusion: str, count: int):
+        """Each cell, not just the one that happens to matter.
+
+        Guarding only `success` left `skipped` free to say 99. One case per
+        conclusion because an aggregate hides which cell went stale.
+        """
+        assert f"| `{conclusion}` | {count} |" in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("run_id,duration", sorted(SKIP_DURATIONS_MS.items()))
+    def test_each_instances_duration_is_transcribed_correctly(self, run_id: str, duration: int):
+        """Anchored to the run's own row, not to the file.
+
+        These are immutable historical measurements, so they cannot go stale —
+        they can only be mis-transcribed by a future editor, and a review round
+        showed all three could be rewritten to 9,999 ms with the suite green.
+        Asserted per row because the document's argument is that they *agree*;
+        a check that accepted any one of them would not notice two of three
+        being changed.
+        """
+        rows = [line for line in AGENT_DOC.read_text().splitlines() if run_id in line]
+        assert rows, f"no line mentions run {run_id}"
+        assert any(f"{duration:,} ms" in row for row in rows), (
+            f"run {run_id}'s duration is not documented as {duration:,} ms: {rows}"
+        )
+
+    def test_the_durations_support_the_claim_made_about_them(self):
+        """The document says the spread is 1.62-1.70 s. Check the data says so.
+
+        A guard on the transcription alone would happily pin three numbers that
+        refute the sentence they are cited for.
+        """
+        # 1,616 ms is the fastest, and it rounds to 1.62 s — so the lower
+        # bound is the smallest value the document's own wording admits, not
+        # 1,620 with a fudge subtracted from it.
+        assert min(SKIP_DURATIONS_MS.values()) >= 1_615
+        assert max(SKIP_DURATIONS_MS.values()) <= 1_700
+        assert "1.62-1.70 s" in prose(AGENT_DOC).replace("\u2013", "-")
+
+    @pytest.mark.parametrize("phrase", GUIDANCE_PHRASES)
+    def test_the_guidance_survives(self, phrase: str):
+        """This, not the run table, is what the ticket asked for.
+
+        The historical facts were already pinned by immutable run IDs -- the
+        rot risk was never there. It was here: the guidance is the part a
+        future edit would trim as verbose, and it is the part that tells
+        somebody staring at a 1.6-second green what to do.
+        """
+        assert phrase in prose(AGENT_DOC)
+
+    @pytest.mark.parametrize("phrase", MECHANISM_PHRASES)
+    def test_the_mechanism_is_still_described_correctly(self, phrase: str):
+        """Pins the three load-bearing claims, each separately falsifiable.
+
+        An earlier draft said the *action* compared the two copies and that
+        nothing distinguished a skip from a review without reading logs. Both
+        were wrong -- it is Anthropic's token-exchange endpoint that refuses,
+        and the `conclusion` output is empty on a skip. Pinned so the
+        corrections cannot quietly revert.
+        """
+        assert phrase in prose(AGENT_DOC)
+
+    def test_the_first_real_review_is_on_the_record(self):
+        """The one run that proves the gate can work, and #9's own proof standard.
+
+        Item 3 of #9 says the proof of a workflow edit is the *next* PR. PR #20
+        edited the gate; this document's PR is that next PR, and run
+        39897838521 is the first review this repo ever received. Pinned
+        because "zero reviews in its entire history" was true when written and
+        is the kind of sentence that survives being falsified.
+        """
+        body = prose(AGENT_DOC)
+        assert FIRST_REAL_REVIEW_RUN in body
+        assert "is the first real review" in body
+        assert "for its first 25 runs" in body, (
+            "the zero-reviews claim is no longer bounded — it was falsified by "
+            f"run {FIRST_REAL_REVIEW_RUN} and must stay in the past tense"
+        )
+
+    @pytest.mark.parametrize("phrase,expected", BULLET_COUNT_PHRASES)
+    def test_a_heading_that_counts_its_bullets_still_counts_right(self, phrase: str, expected: int):
+        """Counts the bullets under the heading, rather than pinning the word.
+
+        Pinning the phrase alone would hold the number steady while a fourth
+        bullet appeared beneath it -- the same drift this document exists to
+        complain about, which review found twice in my own prose. So the
+        assertion reads the structure and compares it against the word.
+        """
+        assert phrase in prose(AGENT_DOC), f"heading moved or was reworded: {phrase!r}"
+        # Raw text from here on: the count comes from the line structure, which
+        # `prose()` destroys. So the heading has to sit on a single line, and
+        # the assertion below is what tells a future editor that when they
+        # reflow it.
+        body = AGENT_DOC.read_text()
+        assert phrase in body, (
+            f"{phrase!r} is in the document but wrapped across lines, so the "
+            "bullet count below cannot be anchored. Keep it on one line."
+        )
+        after = body.split(phrase, 1)[1]
+        # The list ends at the first blank line that is not inside it: bullets
+        # here are "- " at column 0, continuation lines are indented.
+        bullets = 0
+        for line in after.splitlines():
+            if line.startswith("- "):
+                bullets += 1
+            elif line and not line.startswith(" ") and bullets:
+                break
+        assert bullets == expected, f"{phrase!r} announces {expected}, found {bullets}"
+
+    def test_the_stale_workflow_comment_is_acknowledged(self):
+        """The workflow's own comment block still carries the 14-run reading.
+
+        It cannot be corrected from a reviewable PR, so the next best thing is
+        saying which copy is authoritative. If someone does fix that comment,
+        this guard is the reminder to drop the acknowledgement with it.
+        """
+        body = prose(AGENT_DOC)
+        assert "Known stale copy" in body
+        assert "all 14 recorded runs" in WORKFLOW.read_text(), (
+            "the workflow comment no longer carries the superseded reading — "
+            "drop the 'Known stale copy' section from CLAUDE.md"
+        )
+
+    def test_the_glossary_owns_the_term(self):
+        """`workflow validation skip` is the canonical name (GLOSSARY discipline).
+
+        Named after the action's own log line rather than after the behaviour,
+        so an agent grepping the failure lands on the term. The aliases this
+        repo's own issues and comments used — "anti-tamper validation" — ride
+        on the row so they lead here too.
+        """
+        body = GLOSSARY.read_text()
+        assert "**workflow validation skip**" in body
+        # The spellings this repo's own issues and comments used, so an agent
+        # arriving on a legacy name lands here and switches over.
+        assert "anti-tamper validation" in body
+        # Deliberately does NOT assert a count. The row used to restate "all
+        # three of this repo's success runs", which is a fourth copy of one
+        # number in a second file — rot the guards cannot see. CLAUDE.md owns
+        # the evidence; the row points at it.
+        assert "CLAUDE.md" in body
