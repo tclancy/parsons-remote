@@ -45,6 +45,40 @@ WORKFLOW_VALIDATION_SKIP_RUNS = {
 #: between the guard and the prose for the same reason as the run IDs.
 VALIDATION_SKIP_LOG_LINE = "Exiting due to workflow validation skip"
 
+#: The nested `run` step's `duration_ms` for each skip, from the
+#: `##[end-action ...]` line of each run's log. These are what make "~1.6 s is
+#: the signature of this failure mode, not a quirk of one run" a checkable
+#: claim rather than an assertion: the spread is 79 ms across 14 months.
+SKIP_DURATIONS_MS = {"30537851656": 1695, "35360053668": 1616, "36484572525": 1625}
+
+#: Every conclusion the 25 runs produced, re-derived 2026-10-22. Shared with
+#: the table in `CLAUDE.md` so a count cannot drift in prose: a review round
+#: found that raising `skipped` from 21 to 99 in the document left the suite
+#: green, because nothing read that cell.
+RUN_TOTALS = {"skipped": 21, "success": len(WORKFLOW_VALIDATION_SKIP_RUNS), "failure": 1}
+
+#: The three instructions scope item 3 of #9 actually asked to be written down.
+#: Guarded because the run table was not the deliverable -- this is. A review
+#: round deleted the whole `### What to do instead` section, and separately
+#: inverted all three bullets, with the suite green both times.
+GUIDANCE_PHRASES = (
+    "Gets Tom's explicit approval",
+    "Is proved by the *next* PR",
+    "Should not carry unrelated changes",
+)
+
+#: The claim the document's conclusion rests on. Inverting it to "reviews
+#: normally and reports `failure`" also passed a green suite.
+MECHANISM_PHRASES = (
+    # Not the action comparing two copies, which is what an earlier draft said.
+    "The validation is **server-side",
+    "workflow_not_found_on_default_branch",
+    # And the green IS distinguishable without logs, which that draft denied.
+    "`conclusion` output is **empty**",
+    # Which makes the behaviour auth-mode-dependent rather than absolute.
+    "Supplying `github_token` would bypass it entirely",
+)
+
 
 def extract_claude_args(text: str) -> str:
     """Return the `claude_args:` line from a workflow document.
@@ -241,7 +275,7 @@ class TestTheGuardsReadTheSettingNotTheComment:
         assert any("--max-turns" in line for line in comments)
 
 
-class TestTheAntiTamperBehaviourStaysDocumented:
+class TestTheWorkflowValidationSkipStaysDocumented:
     """Scope item 3 of #9.
 
     The gate cannot review a PR that edits it, so the only thing standing
@@ -286,17 +320,85 @@ class TestTheAntiTamperBehaviourStaysDocumented:
         """
         rows = [line for line in AGENT_DOC.read_text().splitlines() if run_id in line]
         assert rows, f"no line mentions run {run_id}"
-        assert any(f"/pull/{pr}" in row for row in rows), (
+        # `/pull/3` is a prefix of `/pull/31`, so a bare substring test passes
+        # a row that pairs this run with PR #31. The repo is at PR #22, so that
+        # was weeks from being a live false pass rather than a hypothetical.
+        assert any(re.search(rf"/pull/{pr}\)", row) for row in rows), (
             f"run {run_id} is documented, but not against PR #{pr}: {rows}"
         )
 
-    def test_the_count_in_the_agent_doc_matches_the_constant(self):
-        """The prose claims a number of greens. Pin it to the constant.
+    @pytest.mark.parametrize("conclusion,count", sorted(RUN_TOTALS.items()))
+    def test_every_run_total_is_read_out_of_the_table(self, conclusion: str, count: int):
+        """Each cell, not just the one that happens to matter.
 
-        Without this, the table can gain a row while the sentence above it
-        still says three — and the sentence is the part a reader believes.
+        Guarding only `success` left `skipped` free to say 99. One case per
+        conclusion because an aggregate hides which cell went stale.
         """
-        assert f"| `success` | **{len(WORKFLOW_VALIDATION_SKIP_RUNS)}** |" in AGENT_DOC.read_text()
+        assert f"| `{conclusion}` | {count} |" in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("run_id,duration", sorted(SKIP_DURATIONS_MS.items()))
+    def test_each_instances_duration_is_transcribed_correctly(self, run_id: str, duration: int):
+        """Anchored to the run's own row, not to the file.
+
+        These are immutable historical measurements, so they cannot go stale —
+        they can only be mis-transcribed by a future editor, and a review round
+        showed all three could be rewritten to 9,999 ms with the suite green.
+        Asserted per row because the document's argument is that they *agree*;
+        a check that accepted any one of them would not notice two of three
+        being changed.
+        """
+        rows = [line for line in AGENT_DOC.read_text().splitlines() if run_id in line]
+        assert rows, f"no line mentions run {run_id}"
+        assert any(f"{duration:,} ms" in row for row in rows), (
+            f"run {run_id}'s duration is not documented as {duration:,} ms: {rows}"
+        )
+
+    def test_the_durations_support_the_claim_made_about_them(self):
+        """The document says the spread is 1.62-1.70 s. Check the data says so.
+
+        A guard on the transcription alone would happily pin three numbers that
+        refute the sentence they are cited for.
+        """
+        assert min(SKIP_DURATIONS_MS.values()) >= 1_620 - 10
+        assert max(SKIP_DURATIONS_MS.values()) <= 1_700
+        assert "1.62-1.70 s" in AGENT_DOC.read_text().replace("\u2013", "-")
+
+    @pytest.mark.parametrize("phrase", GUIDANCE_PHRASES)
+    def test_the_guidance_survives(self, phrase: str):
+        """This, not the run table, is what the ticket asked for.
+
+        The historical facts were already pinned by immutable run IDs -- the
+        rot risk was never there. It was here: the guidance is the part a
+        future edit would trim as verbose, and it is the part that tells
+        somebody staring at a 1.6-second green what to do.
+        """
+        assert phrase in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("phrase", MECHANISM_PHRASES)
+    def test_the_mechanism_is_still_described_correctly(self, phrase: str):
+        """Pins the three load-bearing claims, each separately falsifiable.
+
+        An earlier draft said the *action* compared the two copies and that
+        nothing distinguished a skip from a review without reading logs. Both
+        were wrong -- it is Anthropic's token-exchange endpoint that refuses,
+        and the `conclusion` output is empty on a skip. Pinned so the
+        corrections cannot quietly revert.
+        """
+        assert phrase in AGENT_DOC.read_text()
+
+    def test_the_stale_workflow_comment_is_acknowledged(self):
+        """The workflow's own comment block still carries the 14-run reading.
+
+        It cannot be corrected from a reviewable PR, so the next best thing is
+        saying which copy is authoritative. If someone does fix that comment,
+        this guard is the reminder to drop the acknowledgement with it.
+        """
+        body = AGENT_DOC.read_text()
+        assert "Known stale copy" in body
+        assert "all 14 recorded runs" in WORKFLOW.read_text(), (
+            "the workflow comment no longer carries the superseded reading — "
+            "drop the 'Known stale copy' section from CLAUDE.md"
+        )
 
     def test_the_glossary_owns_the_term(self):
         """`workflow validation skip` is the canonical name (GLOSSARY discipline).
@@ -308,4 +410,11 @@ class TestTheAntiTamperBehaviourStaysDocumented:
         """
         body = GLOSSARY.read_text()
         assert "**workflow validation skip**" in body
+        # The spellings this repo's own issues and comments used, so an agent
+        # arriving on a legacy name lands here and switches over.
         assert "anti-tamper validation" in body
+        # Deliberately does NOT assert a count. The row used to restate "all
+        # three of this repo's success runs", which is a fourth copy of one
+        # number in a second file — rot the guards cannot see. CLAUDE.md owns
+        # the evidence; the row points at it.
+        assert "CLAUDE.md" in body
