@@ -26,6 +26,24 @@ from pathlib import Path
 import pytest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "claude-code-review.yml"
+AGENT_DOC = Path(__file__).resolve().parents[1] / "CLAUDE.md"
+GLOSSARY = Path(__file__).resolve().parents[1] / "GLOSSARY.md"
+
+#: Every run of this workflow that concluded `success` without reviewing
+#: anything, because the action found the branch copy of the workflow differed
+#: from the default branch's. Re-derived from the Actions API on 2026-10-22,
+#: all 25 runs: these three are the *only* greens, and there are no real
+#: reviews. `CLAUDE.md` carries the full table; the guard below asserts the two
+#: stay in step, so adding a fourth instance cannot leave the prose behind.
+WORKFLOW_VALIDATION_SKIP_RUNS = {
+    "30537851656": 3,  # claude/review-gate-inline-comments, 1,695 ms
+    "35360053668": 14,  # claude/707-reopened-trigger,        1,616 ms
+    "36484572525": 16,  # claude/9-review-turn-budget,        1,625 ms
+}
+
+#: The action's own log line, and therefore the thing to grep for. Shared
+#: between the guard and the prose for the same reason as the run IDs.
+VALIDATION_SKIP_LOG_LINE = "Exiting due to workflow validation skip"
 
 
 def extract_claude_args(text: str) -> str:
@@ -147,23 +165,23 @@ class TestTheReviewGateIsBudgetedForRealReviews:
 
 
 class TestTheGateCanStillFireAtAll:
-    """Every trigger this gate has. Measured 2026-09-28 over all 14 recorded
-    runs of this workflow, it has produced **zero** reviews:
+    """Every trigger this gate has. Re-measured 2026-10-22 over all 25 recorded
+    runs of this workflow, it has still produced **zero** reviews:
 
-    - **11 `skipped`** — filtered out by the job's `if:`. Ten are Dependabot or
-      `chore` pull requests; one is an `issue_comment` that did not contain
-      `/review`.
-    - **2 `success`** — runs 30537851656 (PR #3) and 35360053668 (PR #14), both
-      stopped by the action's anti-tamper validation because both PRs edited
-      this file. The second concluded `success` in **1.6 seconds**.
+    - **21 `skipped`** — filtered out by the job's `if:`: Dependabot bumps,
+      `chore` pull requests, and `issue_comment` runs with no `/review`.
+    - **3 `success`** — every one a `workflow validation skip`
+      (`WORKFLOW_VALIDATION_SKIP_RUNS` below), each on a PR that edited this
+      file. Not two: the 2026-09-28 reading of this predates run 36484572525,
+      which is the run on PR #16 — the PR that added this very file.
     - **1 `failure`** — run 30432219327 (PR #2), `steps=0` ten seconds after
       spawn: the runner was never provisioned, the Actions minute cap.
 
     So the settings the class above pins have never been exercised here, and
-    these guards cannot be validated by "the gate went green once" — two of the
-    three greens on record are a gate that did nothing. Pin the triggers
-    instead: a dropped trigger is the one failure mode that would keep that
-    record at zero forever while looking exactly like it does now.
+    these guards cannot be validated by "the gate went green once" — *all three*
+    greens on record are a gate that did nothing. Pin the triggers instead: a
+    dropped trigger is the one failure mode that would keep that record at zero
+    forever while looking exactly like it does now.
     """
 
     def test_reopened_is_a_trigger(self):
@@ -221,3 +239,73 @@ class TestTheGuardsReadTheSettingNotTheComment:
         ]
         assert any("TodoWrite" in line for line in comments)
         assert any("--max-turns" in line for line in comments)
+
+
+class TestTheAntiTamperBehaviourStaysDocumented:
+    """Scope item 3 of #9.
+
+    The gate cannot review a PR that edits it, so the only thing standing
+    between that fact and the next person reading a 1.6-second green check is
+    prose — and prose with nothing asserting it rots. These guards share
+    `WORKFLOW_VALIDATION_SKIP_RUNS` and `VALIDATION_SKIP_LOG_LINE` with the
+    document rather than restating them, so a fourth instance of the failure
+    cannot be recorded in one place and not the other.
+
+    Deliberately NOT a comment block inside `claude-code-review.yml`: writing
+    it there would make the PR that adds it unreviewable, which is the rule
+    defeating its own documentation. These files are reviewable, which is the
+    whole reason the note lives in them.
+    """
+
+    def test_the_agent_doc_exists(self):
+        assert AGENT_DOC.is_file(), f"CLAUDE.md not found: {AGENT_DOC}"
+
+    def test_the_agent_doc_names_the_log_line_to_grep_for(self):
+        """A reader who has the green check needs the string, not a paraphrase."""
+        assert VALIDATION_SKIP_LOG_LINE in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("run_id", sorted(WORKFLOW_VALIDATION_SKIP_RUNS))
+    def test_every_known_instance_is_in_the_agent_doc(self, run_id: str):
+        """Parametrised over the constant, not over a hand-typed list.
+
+        A single `assert all(...)` would pass a new entry the document never
+        gained, as long as the old ones were still there — the aggregate hides
+        which member failed. One case per run is what makes the fourth
+        instance fail loudly.
+        """
+        assert run_id in AGENT_DOC.read_text()
+
+    @pytest.mark.parametrize("run_id,pr", sorted(WORKFLOW_VALIDATION_SKIP_RUNS.items()))
+    def test_each_instance_is_attributed_to_its_pull_request(self, run_id: str, pr: int):
+        """Run ID *and* PR number, because the two have been mismatched before.
+
+        Membership is not correspondence: asserting both strings appear
+        somewhere in the file would pass a table that paired run
+        30537851656 with PR #16. Anchored to the table row so the pairing is
+        what is checked.
+        """
+        rows = [line for line in AGENT_DOC.read_text().splitlines() if run_id in line]
+        assert rows, f"no line mentions run {run_id}"
+        assert any(f"/pull/{pr}" in row for row in rows), (
+            f"run {run_id} is documented, but not against PR #{pr}: {rows}"
+        )
+
+    def test_the_count_in_the_agent_doc_matches_the_constant(self):
+        """The prose claims a number of greens. Pin it to the constant.
+
+        Without this, the table can gain a row while the sentence above it
+        still says three — and the sentence is the part a reader believes.
+        """
+        assert f"| `success` | **{len(WORKFLOW_VALIDATION_SKIP_RUNS)}** |" in AGENT_DOC.read_text()
+
+    def test_the_glossary_owns_the_term(self):
+        """`workflow validation skip` is the canonical name (GLOSSARY discipline).
+
+        Named after the action's own log line rather than after the behaviour,
+        so an agent grepping the failure lands on the term. The aliases this
+        repo's own issues and comments used — "anti-tamper validation" — ride
+        on the row so they lead here too.
+        """
+        body = GLOSSARY.read_text()
+        assert "**workflow validation skip**" in body
+        assert "anti-tamper validation" in body
