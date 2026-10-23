@@ -45,6 +45,12 @@ WORKFLOW_VALIDATION_SKIP_RUNS = {
 #: between the guard and the prose for the same reason as the run IDs.
 VALIDATION_SKIP_LOG_LINE = "Exiting due to workflow validation skip"
 
+#: The first run of this workflow that actually reviewed anything, 2026-10-23.
+#: Kept beside the skip list because it is the control for it: every claim
+#: about what a skip looks like is only meaningful against a run that did not
+#: skip. 42 s, 4 turns, $0.138, `duration_ms=42000`.
+FIRST_REAL_REVIEW_RUN = "39897838521"
+
 #: The nested `run` step's `duration_ms` for each skip, from the
 #: `##[end-action ...]` line of each run's log. These are what make "~1.6 s is
 #: the signature of this failure mode, not a quirk of one run" a checkable
@@ -77,6 +83,11 @@ MECHANISM_PHRASES = (
     "`conclusion` output is **empty**",
     # Which makes the behaviour auth-mode-dependent rather than absolute.
     "Supplying `github_token` would bypass it entirely",
+    # And the recipe this document gives must not be the one that misfires on
+    # this document. Run 39897838521 is a real review whose log matches the
+    # grep string once, because the reviewer read the paragraph telling it to.
+    "**Do not grep the whole log for that string.**",
+    '`"num_turns"` is the cheapest positive test',
 )
 
 
@@ -111,6 +122,18 @@ def extract_claude_args(text: str) -> str:
             )
         return stripped
     pytest.fail("no claude_args: line in the review workflow")
+
+
+def prose(path: Path) -> str:
+    """Return ``path``'s text with every run of whitespace collapsed to a space.
+
+    Prose guards have to read it this way. The phrases below are sentences a
+    human wrote and a human will reflow: ``"is the first real review"`` sat
+    across a line break with a two-space indent, and an exact-match guard on it
+    went red for a wrap rather than for a change in meaning. Table cells and
+    run IDs are matched exactly, because those cannot wrap.
+    """
+    return " ".join(path.read_text().split())
 
 
 def pull_request_types(text: str) -> set[str]:
@@ -372,7 +395,7 @@ class TestTheWorkflowValidationSkipStaysDocumented:
         future edit would trim as verbose, and it is the part that tells
         somebody staring at a 1.6-second green what to do.
         """
-        assert phrase in AGENT_DOC.read_text()
+        assert phrase in prose(AGENT_DOC)
 
     @pytest.mark.parametrize("phrase", MECHANISM_PHRASES)
     def test_the_mechanism_is_still_described_correctly(self, phrase: str):
@@ -384,7 +407,24 @@ class TestTheWorkflowValidationSkipStaysDocumented:
         and the `conclusion` output is empty on a skip. Pinned so the
         corrections cannot quietly revert.
         """
-        assert phrase in AGENT_DOC.read_text()
+        assert phrase in prose(AGENT_DOC)
+
+    def test_the_first_real_review_is_on_the_record(self):
+        """The one run that proves the gate can work, and #9's own proof standard.
+
+        Item 3 of #9 says the proof of a workflow edit is the *next* PR. PR #20
+        edited the gate; this document's PR is that next PR, and run
+        39897838521 is the first review this repo ever received. Pinned
+        because "zero reviews in its entire history" was true when written and
+        is the kind of sentence that survives being falsified.
+        """
+        body = prose(AGENT_DOC)
+        assert FIRST_REAL_REVIEW_RUN in body
+        assert "is the first real review" in body
+        assert "for its first 25 runs" in body, (
+            "the zero-reviews claim is no longer bounded — it was falsified by "
+            f"run {FIRST_REAL_REVIEW_RUN} and must stay in the past tense"
+        )
 
     def test_the_stale_workflow_comment_is_acknowledged(self):
         """The workflow's own comment block still carries the 14-run reading.
@@ -393,7 +433,7 @@ class TestTheWorkflowValidationSkipStaysDocumented:
         saying which copy is authoritative. If someone does fix that comment,
         this guard is the reminder to drop the acknowledgement with it.
         """
-        body = AGENT_DOC.read_text()
+        body = prose(AGENT_DOC)
         assert "Known stale copy" in body
         assert "all 14 recorded runs" in WORKFLOW.read_text(), (
             "the workflow comment no longer carries the superseded reading — "

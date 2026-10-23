@@ -66,7 +66,27 @@ repository's default branch. ...
 Exiting due to workflow validation skip
 ```
 
-`Exiting due to workflow validation skip` is the string to grep for.
+**Do not grep the whole log for that string.** This file quotes it, and this
+file is in the review's own reading — run
+[`39897838521`](https://github.com/tclancy/parsons-remote/actions/runs/39897838521)
+is a *real* review whose log matches `Exiting due to workflow validation skip`
+exactly once, at line 507, because the reviewer read this paragraph aloud. A
+bare grep over any run that touched these docs reports a skip that did not
+happen. The `##[warning]` prefix does not save you either — the block above
+quotes that too.
+
+Use a discriminator the prose cannot forge:
+
+| check | real review | validation skip |
+|---|---|---|
+| action's `conclusion` output | `success` / `failure` | **empty** |
+| `"num_turns"` in the log | present | **absent** — the skip returns before Claude is ever invoked |
+| nested `run` step `duration_ms` | tens of seconds | ~1,600 |
+| job wall clock | ~50 s | 9-11 s |
+
+`"num_turns"` is the cheapest positive test from a log: run `39897838521`
+reports `"num_turns": 4`, `"total_cost_usd": 0.138` and
+`duration_ms=42000`, and no skip can.
 
 **A PR that *deletes* the workflow produces no run at all** — GitHub evaluates
 `pull_request` workflows from the merge ref, so there is nothing to skip. That
@@ -102,13 +122,18 @@ Two things follow that earlier write-ups of this got wrong:
   `duration_ms`, which appears only in the `##[end-action …]` log line — not
   the run's or the step's, which are the columns beside it. Compare like with
   like.
-- **This repo has produced zero reviews in its entire history.** Not "has not
-  hit the failure yet" — the gate has never run to completion once, which is
-  independently checkable: `/pulls/comments` is empty repo-wide and
-  `/pulls/N/reviews` is empty for every PR. So no setting in that workflow has
-  ever been exercised here, and "the gate went green" is not evidence that any
-  of it works. `tests/test_review_workflow_config.py` exists for that reason:
-  the guards are the only thing standing in for a gate that has never fired.
+- **This repo produced zero reviews for its first 25 runs.** Not "has not hit
+  the failure yet" — through run `39570227467` the gate had never once run to
+  completion, which was independently checkable: `/pulls/comments` empty
+  repo-wide and `/pulls/N/reviews` empty for every PR. So no setting in that
+  workflow had ever been exercised here, and "the gate went green" was not
+  evidence that any of it worked. `tests/test_review_workflow_config.py`
+  exists for that reason: the guards were the only thing standing in for a
+  gate that had never fired.
+- **Run `39897838521`, on the PR that added this file, is the first real
+  review.** 42 s, 4 turns, $0.138, a posted verdict. It is also the proof #9
+  asked for: PR #20 edited the workflow and could not be reviewed, so the
+  *next* PR was the first test of whether the edit worked. It did.
 
 ### What to do instead
 
