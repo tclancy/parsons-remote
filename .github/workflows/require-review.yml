@@ -59,6 +59,30 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
   issue_comment:
+    # OBSERVED ON THIS WORKFLOW'S OWN FIRST PR (#26), and it is a property of
+    # GitHub rather than of this file: an `issue_comment` run ALWAYS executes
+    # the copy of the workflow on the **default branch**, because the event is
+    # attached to an issue rather than to a PR ref. So until this file is on
+    # `main`, no `issue_comment` run can fire for it at all -- and the `/review`
+    # remedy named in `review-gate.jq`'s refusal messages does nothing on a PR
+    # whose branch is the only place this workflow exists.
+    #
+    # Measured on #26: `claude[bot]` posted at 20:13:30 and finished editing at
+    # 20:14:06, both after the head commit at 20:13:06, and the status stayed
+    # red because no run fired. `pull_request_review` is NOT affected -- that
+    # event carries the PR ref, and its run at 20:10:48 did execute the branch
+    # copy and did flip the status green.
+    #
+    # Consequences, in the order they bite:
+    #   * On the PR that INTRODUCES this gate, `/review` cannot clear the
+    #     status. A re-gate (`gh pr close N && gh pr reopen N`) can, because
+    #     `reopened` is a `pull_request` event, as can Tom submitting a formal
+    #     review. That is how #26 was taken green.
+    #   * Once merged, `/review` works as the refusal message says.
+    #   * A later PR that EDITS this file is graded by `main`'s copy on the
+    #     comment path and by its own on the `pull_request` path, so the two can
+    #     disagree. Related to the self-grading note at the top of this file.
+    #
     # `edited` as well as `created`, and that is a consequence of the gate's
     # own rule rather than a nicety. `.github/review-gate.jq` rejects a bot
     # comment that is the action's in-flight status line, and `track_progress:

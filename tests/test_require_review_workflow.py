@@ -170,6 +170,25 @@ class TestTheTriggersCoverEveryWayAVerdictCanChange:
         assert pr_types, "the reviewer declares no pull_request types"
         assert "synchronize" not in pr_types.group(1)
 
+    def test_the_issue_comment_default_branch_limitation_is_recorded(self, gate):
+        """The `/review` remedy is inert until this file is on the default branch.
+
+        An `issue_comment` run always executes the default branch's copy of a
+        workflow, because the event is attached to an issue rather than a PR
+        ref. Observed on this gate's own first PR: the reviewer posted after the
+        head commit and the status stayed red because no run fired.
+
+        Guarded as *documentation* rather than behaviour, because there is
+        nothing in this file that can change it -- but a future reader debugging
+        a red status that `/review` will not clear needs to find this, and
+        `review-gate.jq`'s refusal text points them at `/review` unqualified.
+        """
+        assert "default branch" in gate
+        assert "issue_comment" in gate
+        # The refusal text names `/review`, so the caveat has to be reachable
+        # from the file a reader lands in.
+        assert "/review" in gate
+
     def test_edited_is_declared_because_the_progress_comment_is_edited_in_place(self, gate):
         issue_comment = re.search(
             r"^  issue_comment:\n(?:.*\n)*?\s+types: \[([^\]]+)\]", gate, re.MULTILINE
