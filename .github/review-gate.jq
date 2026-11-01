@@ -13,8 +13,14 @@
 # composite action, and the sizing argument for that is on bluelinky#35. Diff
 # against the blob above before assuming a difference here is a bug.
 #
-# Three things below are DIFFERENT from bluelinky's copy, deliberately, and each
-# is marked `DIVERGES:` at the point of divergence. They are not omissions.
+# FOUR things differ from bluelinky's copy, deliberately. Three are notes whose
+# claims are about *that* repo and false about this one; they are marked
+# `DIVERGES (n)` at the point of divergence -- (1) and the checklist rows are in
+# this file, (2) and (3) are in `require-review.yml`. The fourth is the only
+# BEHAVIOURAL difference and it is a fix rather than an adaptation: the login
+# filter on the formal-review arm below, which bluelinky's copy does not have.
+# A fifth, smaller one lives in `require-review.yml`'s job `if:`, which also
+# admits `@claude review` because this repo's reviewer does. None are omissions.
 #
 # INPUT
 #   {
@@ -23,6 +29,7 @@
 #     "author":            "<PR author login>",
 #     "title":             "<PR title>",
 #     "bot_logins":        ["claude[bot]"],
+#     "reviewer_logins":   ["tclancy"],
 #     "comments":          [ GitHub issue-comment objects ],
 #     "reviews":           [ GitHub review objects ]
 #   }
@@ -175,7 +182,7 @@ def exempt_reason:
 # needs no separate guard.
 def is_bot($bots): . as $l | ($bots | index($l)) != null;
 
-def candidates($bots):
+def candidates($bots; $reviewers):
   # Comments first, then formal reviews -- so a PR satisfied by a bot review
   # comment reports that rather than a formal review that happens to coexist.
   #
@@ -190,7 +197,29 @@ def candidates($bots):
       | select(.body | counts_as_review)
       | { ts: .updated_at,
           why: "Review present: comment by \(.user.login // "?") at \(.updated_at // "?")" } ),
+    # THE LOGIN FILTER ON THIS ARM IS LOAD-BEARING, and it was absent from
+    # bluelinky's copy -- the one executable difference from the port, found in
+    # review here on 2026-11-01 and reproduced against the real program:
+    #
+    #   reviews: [{user: {login: "random-passerby"}, state: "CHANGES_REQUESTED"}]
+    #     -> {"state":"success","description":"Review present: formal ..."}
+    #
+    # This repo is PUBLIC, so any authenticated GitHub user can submit a review
+    # on an open PR and turn the gate green having read nothing. Worse for the
+    # gate's actual threat model: GitHub permits one fleet bot to approve
+    # another's PR, so `metaframework-dispatch-bot[bot]` approving a
+    # `dispatch-bot[bot]` PR satisfied it too. That is the same one-command
+    # self-service bypass this file rejects `chore:` titles for, and
+    # `GLOSSARY.md` already describes the stricter rule ("or a *human* has left
+    # a formal APPROVED"), so the code was the side that was wrong.
+    #
+    # `$reviewers`, not `$bots`: the two lists answer different questions and
+    # must not be merged. A review BOT satisfies the gate by posting a comment;
+    # a HUMAN satisfies it by submitting a formal verdict. Defaulting
+    # `reviewer_logins` to `["tclancy"]` keeps this arm as the Tom-shaped escape
+    # hatch it is documented to be.
     ( .reviews[]?
+      | select(.user.login | is_bot($reviewers))
       | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
       | { ts: .submitted_at,
           why: "Review present: formal \(.state) by \(.user.login // "?") at \(.submitted_at // "?")" } )
@@ -198,11 +227,12 @@ def candidates($bots):
 
 . as $pr
 | ($pr.bot_logins // ["claude[bot]"]) as $bots
+| ($pr.reviewer_logins // ["tclancy"]) as $reviewers
 | $pr.head_committed_at as $head
 | ($pr | exempt_reason) as $exempt
 | if $exempt != null then pass($exempt)
   else
-    ($pr | candidates($bots)) as $all
+    ($pr | candidates($bots; $reviewers)) as $all
     | ($all | map(select(.ts | is_fresh($head)))) as $fresh
     | if ($fresh | length) > 0 then pass($fresh[0].why)
       elif ($all | length) > 0 then

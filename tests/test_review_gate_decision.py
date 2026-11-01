@@ -133,8 +133,30 @@ def pr(**overrides) -> dict:
     return doc
 
 
-def comment(body: str, *, login: str = "claude[bot]", updated_at: str = AFTER_HEAD) -> dict:
-    return {"user": {"login": login}, "body": body, "updated_at": updated_at}
+def comment(
+    body: str,
+    *,
+    login: str = "claude[bot]",
+    updated_at: str = AFTER_HEAD,
+    created_at: str = BEFORE_HEAD,
+) -> dict:
+    """A GitHub issue-comment object.
+
+    ``created_at`` defaults to a DIFFERENT value from ``updated_at``, and
+    deliberately to a stale one. The gate must score the comment on when it was
+    last edited, because the action posts its progress comment unticked and
+    edits it into the finished one in place. A mutation round on 2026-11-01
+    showed `.updated_at` -> `.created_at` being killed only because no fixture
+    carried a ``created_at`` at all, so `ts` became null and
+    ``is_fresh(null)`` returned true -- a kill for the wrong reason, which says
+    nothing about the field.
+    """
+    return {
+        "user": {"login": login},
+        "body": body,
+        "updated_at": updated_at,
+        "created_at": created_at,
+    }
 
 
 def review(state: str, *, login: str = "tclancy", submitted_at: str = AFTER_HEAD) -> dict:
@@ -185,11 +207,29 @@ class TestAReviewThatNeverHappenedIsNotAReview:
         assert run_gate(pr(comments=[comment("")]))["state"] == "failure"
         assert run_gate(pr(comments=[comment(None)]))["state"] == "failure"
 
-    def test_no_fixture_family_is_empty(self):
+    def test_every_named_fixture_is_still_present(self):
         # A parametrize list scoped to an empty collection passes every time it
         # runs, so the two loops above would go green having asserted nothing.
-        assert len(NON_REVIEW_SHAPES) >= 5
-        assert len(REVIEW_SHAPES) >= 5
+        # `>= 5` was the first version of this and it is a FLOOR, not a
+        # completeness control: over seven shapes it lets two be deleted
+        # silently. Each key below is a distinct failure mode somebody paid for,
+        # so they are named.
+        assert set(NON_REVIEW_SHAPES) == {
+            "in_flight",
+            "errored_no_checklist",
+            "errored_with_elapsed_no_checklist",
+            "errored_partial_checklist",
+            "errored_but_quoting_the_finished_line",
+            "body_opening_with_an_outstanding_item",
+            "in_flight_partial_checklist",
+        }
+        assert set(REVIEW_SHAPES) == {
+            "real_finished",
+            "finished_bolded",
+            "errored_but_completed",
+            "plain_summary",
+            "prose_quoting_the_marker",
+        }
 
     def test_both_families_are_disjoint(self):
         assert not set(NON_REVIEW_SHAPES.values()) & set(REVIEW_SHAPES.values())
@@ -219,6 +259,86 @@ class TestOnlyTheAllowListedBotCounts:
             )
         )
         assert verdict["state"] == "success"
+
+
+class TestOnlyAnAllowListedHumanSatisfiesTheFormalArm:
+    """Finding from the 2026-11-01 review; bluelinky's copy has this hole.
+
+    Reproduced against the real program before it was fixed: a
+    `CHANGES_REQUESTED` from `random-passerby` returned `success`. This repo is
+    public, so any authenticated GitHub account can submit a review on an open
+    PR -- and GitHub lets one fleet bot approve another's PR, which is the same
+    one-command bypass the gate refuses `chore:` titles for.
+    """
+
+    def test_an_arbitrary_github_account_cannot_turn_the_gate_green(self):
+        verdict = run_gate(pr(reviews=[review("CHANGES_REQUESTED", login="random-passerby")]))
+        assert verdict["state"] == "failure"
+
+    def test_a_fleet_bot_cannot_approve_another_bots_pr_into_a_pass(self):
+        verdict = run_gate(
+            pr(
+                author="dispatch-bot[bot]",
+                reviews=[review("APPROVED", login="metaframework-dispatch-bot[bot]")],
+            )
+        )
+        assert verdict["state"] == "failure"
+
+    def test_tom_can(self):
+        # The half that makes the two above meaningful: an allow-list that
+        # admitted nobody would satisfy them while breaking the escape hatch
+        # `GLOSSARY.md` documents.
+        verdict = run_gate(pr(reviews=[review("APPROVED", login="tclancy")]))
+        assert verdict["state"] == "success"
+
+    def test_the_reviewer_list_is_configurable_and_defaults_without_one(self):
+        assert run_gate(pr(reviewer_logins=["someone-else"]))["state"] == "failure"
+        explicit = run_gate(
+            pr(reviewer_logins=["someone-else"], reviews=[review("APPROVED", login="someone-else")])
+        )
+        assert explicit["state"] == "success"
+        # Absent the key entirely, the default applies.
+        implicit = run_gate(
+            {
+                "number": 1,
+                "head_committed_at": HEAD_TS,
+                "comments": [],
+                "reviews": [review("APPROVED", login="tclancy")],
+            }
+        )
+        assert implicit["state"] == "success"
+
+    def test_the_two_allow_lists_are_not_interchangeable(self):
+        # The review bot's login must not satisfy the formal arm, and Tom's must
+        # not satisfy the bot-comment arm. Merging the lists would pass both.
+        bot_formal = run_gate(pr(reviews=[review("APPROVED", login="claude[bot]")]))
+        assert bot_formal["state"] == "failure"
+        human_comment = run_gate(pr(comments=[comment(REAL_FINISHED_COMMENT, login="tclancy")]))
+        assert human_comment["state"] == "failure"
+
+
+class TestTheCommentIsScoredOnWhenItWasEdited:
+    def test_an_edit_after_the_head_counts_even_though_creation_predates_it(self):
+        verdict = run_gate(
+            pr(
+                comments=[
+                    comment(REAL_FINISHED_COMMENT, created_at=BEFORE_HEAD, updated_at=AFTER_HEAD)
+                ]
+            )
+        )
+        assert verdict["state"] == "success"
+        assert AFTER_HEAD in verdict["description"], "scored on created_at, not updated_at"
+
+    def test_creation_after_the_head_does_not_rescue_a_stale_edit(self):
+        # The inverse, so the test above cannot pass by reading either field.
+        verdict = run_gate(
+            pr(
+                comments=[
+                    comment(REAL_FINISHED_COMMENT, created_at=AFTER_HEAD, updated_at=BEFORE_HEAD)
+                ]
+            )
+        )
+        assert verdict["state"] == "failure"
 
 
 class TestStaleness:
@@ -262,6 +382,12 @@ class TestStaleness:
 
 
 class TestFormalReviews:
+    def test_the_helper_defaults_to_an_allow_listed_reviewer(self):
+        # Every test in this class relies on it. Stated, because if the default
+        # drifted off the allow-list they would all go red for a reason that has
+        # nothing to do with what they are named for.
+        assert review("APPROVED")["user"]["login"] == "tclancy"
+
     @pytest.mark.parametrize("state", ["APPROVED", "CHANGES_REQUESTED"])
     def test_a_formal_verdict_satisfies_the_gate(self, state):
         verdict = run_gate(pr(reviews=[review(state)]))
@@ -320,9 +446,14 @@ class TestTheDescriptionFitsTheCommitStatusField:
         for doc in docs:
             assert len(run_gate(doc)["description"]) <= 140
 
-    def test_a_long_login_is_truncated_with_an_ellipsis(self):
+    def test_a_refusal_is_bounded_even_when_the_input_is_absurd(self):
+        # Named for what it tests. Its first name claimed truncation, but a
+        # non-allow-listed login never reaches the description at all -- the
+        # verdict is the fixed "No code review for this head" string -- so
+        # replacing `truncate140` with the identity left it green. The pass-path
+        # truncation is covered by the next test, which does drive it.
         verdict = run_gate(pr(comments=[comment(REAL_FINISHED_COMMENT, login="x" * 300)]))
-        # Refused (not an allow-listed bot) -- the point is the length bound.
+        assert verdict["state"] == "failure"
         assert len(verdict["description"]) <= 140
 
     def test_truncation_actually_triggers_on_an_overlong_why(self):

@@ -35,10 +35,25 @@ name: Require Code Review
 # head. That red is accurate -- nothing has reviewed those bytes -- and the
 # remedies are in the refusal text (`/review`, or a re-gate).
 #
-# NOT A MERGE BLOCK. `main` has no branch protection and no rulesets (GitHub
-# Free does not offer them on private repos and none are configured here), so
-# this status blocks nothing mechanically. The red X is backpressure for
-# autonomous agents, which is what #35 asked for.
+# NOT A MERGE BLOCK, and the reason is narrower than it looks. `GET
+# /repos/tclancy/parsons-remote/rulesets` returns `[]` and `main` has no branch
+# protection, so nothing enforces this status today. That is the ONLY reason --
+# this repo is public, so rulesets ARE available here and could make it a real
+# block whenever Tom wants one. (An earlier draft of this paragraph said Free
+# does not offer rulesets on private repos, which is true and is not about this
+# repo.) The red X is backpressure for autonomous agents, which is what #35
+# asked for.
+#
+# WHAT GRADES THIS WORKFLOW. On a `pull_request` event `actions/checkout`
+# defaults to `refs/pull/N/merge`, so the `review-gate.jq` -- and for a
+# same-repo PR, the copy of THIS FILE -- that runs is the PR's own. There is no
+# equivalent here of the server-side check that stops `claude-code-review.yml`
+# reviewing a PR that edits it (the **workflow validation skip** in
+# `GLOSSARY.md`): a PR CAN grant itself a laxer `dispatch/require-review`.
+# Pinning `ref:` to the default branch would fix the gate half of that, and it
+# is deliberately NOT done in the PR that introduces the file, because the
+# default branch does not carry `.github/review-gate.jq` until this merges and
+# the sparse checkout would resolve to nothing. Worth revisiting once it has.
 
 on:
   pull_request:
@@ -121,9 +136,15 @@ jobs:
           # it.
           #
           # Every value arrives through `env:` above rather than being
-          # interpolated into this script by a GitHub expression. A PR title or
-          # comment body spliced straight into shell is a command-injection
-          # surface, and one of the fields read downstream IS the PR title.
+          # interpolated into this script by a GitHub expression. Stated
+          # precisely, because the obvious justification overclaims: NO
+          # attacker-controlled text reaches a shell anywhere in this workflow
+          # today. The PR title does enter the gate, but it travels
+          # file -> `--slurpfile` -> file and is never a shell word, and the
+          # five values below are an event name, two numbers, a repo slug and a
+          # SHA. The discipline is kept because it is the surface the next edit
+          # reaches for, and because of the parsing hazard immediately below --
+          # not because there is a live injection here.
           #
           # And an expression in a `run:` body is not inert even in a COMMENT:
           # GitHub evaluates them before the shell ever sees the script, so a
@@ -267,9 +288,59 @@ jobs:
                title:  $pr[0].title,
                head_committed_at: $head[0].commit.committer.date,
                bot_logins: ["claude[bot]"],
+               # The formal-review arm is allow-listed separately -- see the
+               # long note on `candidates` in `.github/review-gate.jq`. This
+               # repo is public, so without it any GitHub account (and any
+               # fleet bot) could turn the status green by submitting a review.
+               reviewer_logins: ["tclancy"],
                comments: $comments[0],
                reviews: $reviews[0] }' > gate-input.json
 
           verdict="$(jq -f .github/review-gate.jq gate-input.json)"
           publish "$(printf '%s' "$verdict" | jq -r .state)" \
                   "$(printf '%s' "$verdict" | jq -r .description)"
+
+      # The ERR trap above only covers the step it is declared in. If the
+      # `Resolve PR number and head SHA` or `Is this a cross-repository PR?`
+      # step dies first -- a transient 5xx or a secondary rate limit on `gh api`
+      # is enough -- then nothing publishes, and the PR silently keeps whatever
+      # `dispatch/require-review` it already had. On a re-evaluation of an
+      # approved-then-pushed PR that is a stale GREEN, which is the exact
+      # failure mode the trap exists to prevent, arriving one step earlier than
+      # the trap can see.
+      #
+      # `if: failure()` so it runs only when something above failed, and it
+      # re-resolves the SHA itself rather than trusting `steps.pr.outputs` --
+      # which is empty precisely when the resolve step is what broke. If the SHA
+      # cannot be recovered at all there is nowhere to post, and saying so in
+      # the log is all that is left.
+      - name: A failure anywhere above must not leave a stale verdict standing
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          if [ "$EVENT_NAME" = "issue_comment" ]; then
+            number="$ISSUE_NUMBER"
+          else
+            number="$PR_NUMBER"
+            sha="$PR_HEAD_SHA"
+          fi
+          if [ -z "${sha:-}" ]; then
+            sha="$(gh api "repos/${REPO}/pulls/${number}" --jq .head.sha || true)"
+          fi
+          if [ -z "${sha:-}" ]; then
+            echo "::warning::Could not resolve a head SHA, so no status could be published."
+            exit 0
+          fi
+          gh api -X POST "repos/${REPO}/statuses/${sha}" \
+            -f state=error \
+            -f context="dispatch/require-review" \
+            -f description="Gate failed before it could evaluate - see the run log. Not a review verdict." \
+            -f target_url="${RUN_URL}" >/dev/null || true
