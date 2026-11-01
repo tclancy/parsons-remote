@@ -199,7 +199,12 @@ class TestTheStatusLandsOnThePrHead:
 class TestFailureModesPublishSomethingRatherThanNothing:
     def test_an_unset_reviewer_secret_publishes_pending(self, gate):
         assert "publish pending" in gate
-        assert 'if [ -z "${REVIEWER_TOKEN}" ]' in gate
+        # The literal, not the whole `if`: the condition carries a `!=
+        # "success"` conjunct as well, asserted by
+        # `test_the_pending_arm_only_fires_on_a_non_success_verdict`. Pinning
+        # the full line here made this test the thing that broke when that
+        # conjunct was added, which is the wrong guard failing.
+        assert '[ -z "${REVIEWER_TOKEN}" ]' in active_lines(gate)
         assert "CLAUDE_CODE_OAUTH_TOKEN" in gate
 
     def test_an_internal_failure_publishes_error_via_a_trap(self, gate):
@@ -476,23 +481,24 @@ class TestTheGateCannotBeSilentlyDisabled:
                 f"{endpoint} is not reassembled with `{pipeline}`:\n  {line.strip()}"
             )
 
+    UNPROVISIONED_ARM = 'if [ "$state" != "success" ] && [ -z "${REVIEWER_TOKEN}" ]; then'
+
+    def _arm(self, gate: str) -> list[str]:
+        body = [ln.strip() for ln in active_lines(gate).splitlines() if ln.strip()]
+        assert self.UNPROVISIONED_ARM in body, "no unprovisioned-secret arm at all"
+        start = body.index(self.UNPROVISIONED_ARM)
+        end = body.index("fi", start)
+        return body[start + 1 : end]
+
     def test_the_pending_arm_stops_rather_than_falling_through(self, gate):
         """Without the `exit 0`, `pending` is immediately overwritten.
-
-        The status would be replaced by a real verdict computed with no reviewer
-        available, which defeats the whole reason that arm exists.
 
         Read as the `if ... fi` BLOCK, not as a non-greedy regex from
         `publish pending` onwards: there is a second `exit 0` further down, in
         the `failure()` fallback, so the lazy match found that one and the
         mutant removing this one survived (round 2, 2026-11-01).
         """
-        body = [ln.strip() for ln in active_lines(gate).splitlines() if ln.strip()]
-        anchor = 'if [ -z "${REVIEWER_TOKEN}" ]; then'
-        assert anchor in body, "no unprovisioned-secret arm at all"
-        start = body.index(anchor)
-        end = body.index("fi", start)
-        arm = body[start + 1 : end]
+        arm = self._arm(gate)
         assert any(ln == "exit 0" for ln in arm), (
             f"the unprovisioned arm must exit rather than continue to evaluate; arm is {arm}"
         )
@@ -501,10 +507,44 @@ class TestTheGateCannotBeSilentlyDisabled:
     def test_the_pending_arm_slice_is_bounded_by_its_own_fi(self, gate):
         # Control: a slice running to the end of the file would find the
         # fallback step's `exit 0` and the assertion above could not fail.
-        body = [ln.strip() for ln in active_lines(gate).splitlines() if ln.strip()]
-        start = body.index('if [ -z "${REVIEWER_TOKEN}" ]; then')
-        end = body.index("fi", start)
-        assert end - start < 8, "the pending arm slice is too wide to mean anything"
+        assert len(self._arm(gate)) < 6, "the pending arm slice is too wide to mean anything"
+
+    def test_the_unprovisioned_check_runs_after_the_gate_not_before_it(self, gate):
+        """An exemption must not depend on provisioning.
+
+        Dependabot runs read a separate secret store, so
+        `secrets.CLAUDE_CODE_OAUTH_TOKEN` is empty on a Dependabot event even
+        when the Actions secret exists. With the token check first, every
+        Dependabot PR published `pending` -- telling Tom to add a secret that is
+        already there -- instead of the `success` `exempt_reason` grants it.
+        Found in the bot review of PR #26.
+
+        Asserted as an ORDERING, because that is the whole fix: the gate's
+        verdict has to exist before the token is consulted.
+        """
+        active = active_lines(gate)
+        gate_ran = active.index("jq -f .github/review-gate.jq")
+        token_checked = active.index('[ -z "${REVIEWER_TOKEN}" ]')
+        assert gate_ran < token_checked, (
+            "the token check short-circuits before the gate runs, so the Dependabot "
+            "exemption is unreachable on exactly the PRs that need it"
+        )
+
+    def test_the_pending_arm_only_fires_on_a_non_success_verdict(self, gate):
+        # The other half of the ordering fix. Without the `!= "success"`
+        # conjunct, a Dependabot PR would be re-graded `pending` even with the
+        # gate already having exempted it.
+        assert '[ "$state" != "success" ]' in active_lines(gate)
+
+    def test_the_exemption_lives_in_exactly_one_file(self, gate):
+        # The alternative fix -- test the author in shell before the token
+        # check -- would put `dependabot[bot]` in both files, which is the drift
+        # `test_the_exempt_author_lists_agree` exists to catch.
+        for author in EXEMPT_AUTHORS:
+            assert author not in active_lines(gate), (
+                f"{author} is named in the workflow as well as the jq logic; the "
+                "exemption must have one source of truth"
+            )
 
     def test_the_issue_comment_arm_requires_the_comment_to_be_on_a_pr(self, gate):
         # Without this the job runs on plain issue comments, where

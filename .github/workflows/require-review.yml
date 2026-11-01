@@ -230,13 +230,15 @@ jobs:
           # transfer option (a) was chosen to avoid. `pending` instead: visibly
           # not-green, not a false pass, and it names the owner and the remedy.
           #
-          # DIVERGES (3) in what this arm MEANS here. In bluelinky it is the
-          # expected state: that repo had no Actions secrets at all when the
-          # gate landed, and `claude[bot]` has still never posted there. In
-          # THIS repo the reviewer is provisioned and working -- three real
-          # `claude[bot]` reviews on PR #23 on 2026-10-23, 17-24s each -- so
-          # this arm is defensive only, and it firing here would mean the
-          # secret was rotated out or revoked rather than never added.
+          # DIVERGES (3) in what this arm MEANS here, and in where it sits.
+          # In bluelinky it is the expected state: that repo had no Actions
+          # secrets at all when the gate landed, and `claude[bot]` has still
+          # never posted there. In THIS repo the reviewer is provisioned and
+          # working -- three real `claude[bot]` reviews on PR #23 on 2026-10-23,
+          # 17-24s each -- so for a human-or-agent PR this arm is defensive
+          # only. It is still reachable on a **Dependabot** event, whose runs
+          # read a different secret store, which is why the check now sits
+          # after the gate rather than before it. See the note at its new site.
           REVIEWER_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
           set -euo pipefail
@@ -249,12 +251,6 @@ jobs:
               -f target_url="${RUN_URL}" >/dev/null
             printf 'dispatch/require-review = %s: %s\n' "$1" "$2"
           }
-
-          if [ -z "${REVIEWER_TOKEN}" ]; then
-            publish pending \
-              "Not provisioned: add the CLAUDE_CODE_OAUTH_TOKEN repo secret to enable the reviewer, then re-gate this PR."
-            exit 0
-          fi
 
           # Publish `error` rather than nothing if anything below blows up.
           # Without this the step just dies under `set -e` and NO status is
@@ -297,8 +293,35 @@ jobs:
                reviews: $reviews[0] }' > gate-input.json
 
           verdict="$(jq -f .github/review-gate.jq gate-input.json)"
-          publish "$(printf '%s' "$verdict" | jq -r .state)" \
-                  "$(printf '%s' "$verdict" | jq -r .description)"
+          state="$(printf '%s' "$verdict" | jq -r .state)"
+          description="$(printf '%s' "$verdict" | jq -r .description)"
+
+          # THE UNPROVISIONED CHECK RUNS *AFTER* THE GATE, NOT BEFORE IT, AND
+          # THE ORDER IS THE WHOLE POINT. It used to be the first thing in this
+          # step, which meant an empty `CLAUDE_CODE_OAUTH_TOKEN` short-circuited
+          # before `exempt_reason` was ever evaluated.
+          #
+          # That is not hypothetical here. **Dependabot runs read a separate
+          # secret store** (Settings -> Secrets -> Dependabot), so
+          # `secrets.CLAUDE_CODE_OAUTH_TOKEN` is empty on a Dependabot
+          # `pull_request` event even though the Actions secret exists -- and
+          # this repo's open PRs are mostly Dependabot's. Every one of them
+          # would have published `pending` with a description telling Tom to add
+          # a secret that is already there, instead of the `success` that
+          # `exempt_reason` grants them. Found in the bot review of PR #26.
+          #
+          # Ordering it this way also keeps ONE source of truth for the
+          # exemption. The obvious alternative -- test the author in shell
+          # before the token check -- puts `dependabot[bot]` in both this file
+          # and `review-gate.jq`, which is the drift
+          # `test_the_exempt_author_lists_agree` exists to prevent.
+          if [ "$state" != "success" ] && [ -z "${REVIEWER_TOKEN}" ]; then
+            publish pending \
+              "Not provisioned for this event: no CLAUDE_CODE_OAUTH_TOKEN visible, so the reviewer cannot run. Dependabot uses a separate secret store."
+            exit 0
+          fi
+
+          publish "$state" "$description"
 
       # The ERR trap above only covers the step it is declared in. If the
       # `Resolve PR number and head SHA` or `Is this a cross-repository PR?`
