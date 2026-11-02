@@ -507,3 +507,309 @@ class TestTheWorkflowValidationSkipStaysDocumented:
         # number in a second file — rot the guards cannot see. CLAUDE.md owns
         # the evidence; the row points at it.
         assert "CLAUDE.md" in body
+
+
+#: Real comment bodies from this repo, abridged to the parts the trigger reads:
+#: the opening characters and one `/review` occurrence in context. Every one is
+#: a comment that actually exists, cited so a reader can check the excerpt
+#: against the source rather than trusting it.
+#:
+#: Why real bodies rather than invented ones. The defect below is not that
+#: `contains` is wrong in the abstract -- it is that the comments this repo's
+#: own agents write routinely *mention* `/review`, because the gate's refusal
+#: text instructs them to ("Comment /review on PR #N"). An invented fixture
+#: would have to guess at that, and a guess is what put the bug here.
+TRIGGER_FIXTURES = (
+    (
+        # https://github.com/tclancy/parsons-remote/pull/26#issuecomment-6563346201
+        "genuine-request-6563346201",
+        (
+            "/review\n\nRe-requesting a review bound to the current head `64d0784`,"
+            " which carries only the `issue_comment` documentation commit."
+        ),
+        True,
+    ),
+    (
+        # https://github.com/tclancy/parsons-remote/pull/26#issuecomment-6563410273
+        # Fired run 41346706835 for real: the reviewer replied "Your comment is
+        # a status report and doesn't ask for a change, so I changed no files
+        # and ran nothing."
+        "status-report-6563410273",
+        (
+            "## Final state — all green, and the gate proved itself on its own PR\n\n"
+            "- **head `64d0784`** · `OPEN` / `CLEAN` / `MERGEABLE`\n"
+            "… fire `require-review.yml` from a comment, and the `/review` remedy"
+            " its own refusal text names does nothing yet."
+        ),
+        False,
+    ),
+    (
+        # https://github.com/tclancy/parsons-remote/pull/26#issuecomment-6563348913
+        # The reviewer's OWN output. Latent rather than live -- see
+        # `test_the_reviewers_own_output_would_not_re_trigger_it`.
+        "reviewer-output-6563348913",
+        (
+            "**Claude finished @metaframework-dispatch-bot[bot]'s task in 15s**"
+            " —— [View job](https://github.com/tclancy/parsons-remote/actions/runs/1)\n\n"
+            'The substrings `"default branch"`, `"issue_comment"` and `"/review"`'
+            " appear *anywhere* in the file."
+        ),
+        False,
+    ),
+    (
+        # The free-form escape hatch, which stays unanchored on purpose. No
+        # comment in this repo has used it yet; it is in the workflow's own
+        # documented contract and in `require-review.yml`'s sibling condition,
+        # so it is pinned here rather than left to the first person to try it.
+        "at-claude-midsentence",
+        "Thanks -- when you get a chance, @claude review the new fixture please.",
+        True,
+    ),
+    (
+        # A URL-quoting comment, the shape that motivated anchoring. `/reviews`
+        # contains `/review`, so under the old predicate pasting any reviews
+        # endpoint into a comment spawned a reviewer run.
+        "quoted-reviews-endpoint",
+        "Read it off the thread: `gh api repos/tclancy/parsons-remote/pulls/26/reviews`.",
+        False,
+    ),
+)
+
+
+def job_if_block(text: str) -> str:
+    """The `claude-review` job's `if:` expression, and nothing else.
+
+    Extracted by indentation rather than by "everything up to the next key".
+    An earlier draft terminated the match on `^\\s*\\w+:`, which cannot match
+    `runs-on:` -- `\\w+` stops at the hyphen -- so the whole regex failed and the
+    function returned no terms. Returning no terms is the *safe* direction for
+    the fixtures, which is exactly why it had to be caught by a synthetic
+    document: against the real workflow a parser that reads nothing and a
+    workflow with no trigger are the same observation.
+    """
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        match = re.match(r"^(\s*)if:(.*)$", line)
+        if not match:
+            continue
+        indent, inline = match.group(1), match.group(2)
+        body = [inline]
+        for following in lines[i + 1 :]:
+            if following.strip() and not following.startswith(indent + " "):
+                break
+            body.append(following)
+        return "\n".join(body)
+    return ""
+
+
+def issue_comment_trigger_terms(text: str) -> list[tuple[str, str]]:
+    """The `(operator, literal)` pairs the job's `if:` applies to a comment body.
+
+    Scoped to the `issue_comment` arm deliberately, and this is the same trap
+    `pull_request_types` is written around. A bare search for `startsWith(...)`
+    over the whole document also matches
+    `!startsWith(github.event.pull_request.title, 'chore')` on the
+    `pull_request` arm -- a *different* condition, on a different field, which
+    is already anchored and has nothing to do with the comment trigger. A guard
+    that picked that one up would go green with the comment trigger left
+    entirely unanchored.
+
+    Returns an empty list if the arm is missing, so a deleted condition fails
+    the fixtures below rather than vacuously satisfying them.
+    """
+    block = job_if_block(text)
+    marker = "github.event_name == 'issue_comment'"
+    if marker not in block:
+        return []
+    return re.findall(
+        r"\b(contains|startsWith)\(\s*github\.event\.comment\.body\s*,\s*'([^']*)'\s*\)",
+        block[block.index(marker) :],
+    )
+
+
+def fires_reviewer(body: str, terms: list[tuple[str, str]]) -> bool:
+    """Evaluate the workflow's own comment predicate against ``body``.
+
+    The operators are read OUT OF THE WORKFLOW rather than reimplemented from
+    the spec, which is what makes the fixtures falsifiable: flipping
+    `startsWith` back to `contains` in the YAML changes what this function
+    does, and the status-report fixture then fails. A hand-written mirror of
+    the intended rule would agree with itself no matter what the file said.
+
+    GitHub's `contains` and `startsWith` are both case-insensitive on strings,
+    and neither trims -- so a body whose first character is a newline or space
+    before `/review` does NOT match `startsWith`, which is a real narrowing
+    and is why `@claude review` keeps the unanchored form.
+    """
+    lowered = body.lower()
+    return any(
+        lowered.startswith(literal.lower())
+        if operator == "startsWith"
+        else literal.lower() in lowered
+        for operator, literal in terms
+    )
+
+
+@pytest.fixture(scope="module")
+def terms() -> list[tuple[str, str]]:
+    """The live workflow's comment-trigger terms, or a failure naming the gap."""
+    parsed = issue_comment_trigger_terms(WORKFLOW.read_text())
+    assert parsed, (
+        "no contains()/startsWith() on github.event.comment.body inside the "
+        "issue_comment arm of the job `if:` — the on-demand trigger is gone, or "
+        "the arm was reshaped past what issue_comment_trigger_terms parses"
+    )
+    return parsed
+
+
+class TestOnlyAnActualReviewRequestFiresTheReviewer:
+    """The `issue_comment` trigger must detect a *request*, not a *mention*.
+
+    Measured on this repo on 2026-11-02, over every `issue_comment` run of this
+    workflow in its history. Two passed the job filter and ran the reviewer for
+    real; the rest were skipped. **One of the two was not a review request** --
+    run 41346706835, fired by the status report in `TRIGGER_FIXTURES`, whose
+    only relationship to a review was the word `/review` twice in prose. The
+    reviewer spawned, read the comment, and answered that it had been asked for
+    nothing. Half of this repo's on-demand reviews have been that.
+
+    It keeps happening for a structural reason rather than by accident: the
+    gate's own refusal text is *"Comment /review on PR #N to run the
+    reviewer"*, so every agent comment that quotes the remedy, explains the
+    gate, or summarises a gate PR contains the trigger. `contains` cannot tell
+    those from a request. Anchoring can -- a request IS the comment that opens
+    with the command.
+    """
+
+    @pytest.mark.parametrize("name,body,expected", [(f[0], f[1], f[2]) for f in TRIGGER_FIXTURES])
+    def test_each_measured_comment_shape_gets_the_right_verdict(
+        self, name: str, body: str, expected: bool, terms: list[tuple[str, str]]
+    ):
+        """One case per shape, not one `all(...)` over the set.
+
+        An aggregate would hide which shape regressed, and the two directions
+        fail for opposite reasons: a false positive costs a billable run that
+        reviews nothing, a false negative leaves an agent unable to ask for a
+        review at all. Both have to be nameable.
+        """
+        assert fires_reviewer(body, terms) is expected, (
+            f"{name}: expected fires_reviewer={expected} under the workflow's own terms {terms}"
+        )
+
+    def test_the_slash_review_spelling_is_anchored(self, terms: list[tuple[str, str]]):
+        """`startsWith`, and the point is that `contains` is *absent*.
+
+        Asserting only that `startsWith` appears would pass a condition
+        carrying both operators, where the unanchored one still admits every
+        prose mention — the fix present and inert beside the defect.
+
+        A `{literal: operator}` dict is NOT enough to say that, and the first
+        draft of this guard used one. Duplicate keys collapse last-wins, so a
+        condition spelling `contains(...) || startsWith(...)` — the defect with
+        the fix appended — read back as `startsWith` and passed. Measured: that
+        mutant was killed only by the behavioural fixtures, which are
+        order-independent, while this assertion stayed green. The SET of
+        operators bound to the literal is what has no preferred order.
+        """
+        operators = {operator for operator, literal in terms if literal == "/review"}
+        assert operators == {"startsWith"}, (
+            f"the /review trigger must be anchored and anchored ONLY; its "
+            f"operators are {operators or 'none'} in {terms}"
+        )
+
+    def test_the_at_claude_spelling_stays_unanchored(self, terms: list[tuple[str, str]]):
+        """Deliberately `contains`: it is the free-form escape hatch.
+
+        Anchoring is a real narrowing -- `startsWith` does not trim, so a body
+        beginning with a blank line or a courtesy sentence misses. `@claude
+        review` mid-sentence is the remedy for that, and `require-review.yml`
+        admits both spellings for the same reason, so dropping this one would
+        leave the two halves of the gate disagreeing about what asks for a
+        review.
+        """
+        operators = {operator for operator, literal in terms if literal == "@claude review"}
+        assert operators == {"contains"}, (
+            f"the @claude review trigger must be present and unanchored; its "
+            f"operators are {operators or 'none'} in {terms}"
+        )
+
+    def test_the_reviewers_own_output_would_not_re_trigger_it(self, terms: list[tuple[str, str]]):
+        """The latent self-trigger loop, and the second reason to anchor.
+
+        `claude[bot]`'s finished review quotes `/review` -- it is explaining
+        the gate -- so its FINAL body matches `contains`. That loop is not live
+        today, and it is held off by something narrow: this workflow listens to
+        `issue_comment: types: [created]`, and at *created* time the bot's
+        comment is still the in-flight `Claude Code is working…` stub with no
+        `/review` in it. The real body arrives by EDIT, which is not a trigger
+        here. Measured: every `claude[bot]`-actor run of this workflow concluded
+        `skipped` with `steps=0`.
+
+        `require-review.yml` must listen to `[created, edited]` to see a review
+        finish at all, so "add `edited` here too" is a natural future edit --
+        and under `contains` it would make every review the bot posts spawn
+        another review. Anchoring defuses that in advance: the bot's output
+        opens with `**Claude finished`.
+        """
+        reviewer_output = next(
+            body for name, body, _ in TRIGGER_FIXTURES if name.startswith("reviewer-output")
+        )
+        assert "/review" in reviewer_output, (
+            "fixture no longer contains the substring the old predicate matched, "
+            "so it cannot demonstrate the loop it is here for"
+        )
+        assert not fires_reviewer(reviewer_output, terms)
+
+    def test_the_comment_block_still_describes_the_trigger_it_has(self):
+        """The `# Run when:` block above the `if:` is the first thing a reader
+        sees, and it said "a comment ... explicitly asks for `/review`" while
+        the condition matched any mention. Prose and condition had to disagree
+        for the bug to survive being read."""
+        assert "opens with `/review`" in prose(WORKFLOW)
+
+
+class TestTheTriggerGuardsReadTheRightCondition:
+    """The scoping property `issue_comment_trigger_terms` exists for.
+
+    Asserted against synthetic documents, because against the real workflow
+    these are true by construction — the same reason
+    `test_a_commented_out_claude_args_is_not_returned` is written that way.
+    """
+
+    def test_the_pull_request_arms_own_startswith_is_not_picked_up(self):
+        """The `pull_request` arm anchors a *title* check. A guard that read
+        that one would report the comment trigger as anchored while it was
+        still `contains`."""
+        document = textwrap.dedent("""\
+            jobs:
+              claude-review:
+                if: |
+                  (github.event_name == 'pull_request'
+                    && !startsWith(github.event.pull_request.title, 'chore'))
+                  || (github.event_name == 'issue_comment'
+                    && contains(github.event.comment.body, '/review'))
+                runs-on: ubuntu-latest
+        """)
+        assert issue_comment_trigger_terms(document) == [("contains", "/review")]
+
+    def test_a_missing_issue_comment_arm_returns_no_terms(self):
+        """Empty, not "nothing to check". The `terms` fixture turns that into a
+        failure; returning a permissive default would make a deleted trigger
+        pass every fixture above."""
+        document = textwrap.dedent("""\
+            jobs:
+              claude-review:
+                if: github.event_name == 'pull_request'
+                runs-on: ubuntu-latest
+        """)
+        assert issue_comment_trigger_terms(document) == []
+
+    def test_fires_reviewer_follows_the_operator_it_is_given(self):
+        """The discriminator itself, driven both ways on one body.
+
+        If this passed under both operators the fixtures above would be
+        measuring nothing.
+        """
+        body = "## Status\n\nthe `/review` remedy is named in the refusal text."
+        assert fires_reviewer(body, [("contains", "/review")]) is True
+        assert fires_reviewer(body, [("startsWith", "/review")]) is False

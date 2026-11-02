@@ -39,14 +39,28 @@ jobs:
   claude-review:
     # Run when:
     #   - PR opened by a non-Dependabot author with a non-`chore` title, OR
-    #   - a comment on a PR explicitly asks for `/review` or `@claude review`.
+    #   - a comment on a PR opens with `/review`, or mentions `@claude review`.
+    #
+    # `startsWith` and not `contains` on `/review`: a comment that merely
+    # MENTIONS the remedy is not a request for one, and this repo's comments
+    # mention it constantly because the gate's own refusal text says "Comment
+    # /review on PR #N". Measured 2026-11-02 over every `issue_comment` run of
+    # this workflow: two passed this filter, and one of the two (run
+    # 41346706835) was a status report titled "## Final state - all green"
+    # whose only tie to a review was the word in prose. The reviewer spawned
+    # and answered that it had been asked for nothing. `/reviews` -- any quoted
+    # reviews endpoint -- matched too. `@claude review` stays unanchored as the
+    # free-form escape hatch, since `startsWith` does not trim. The reasoning
+    # and the fixtures are in `tests/test_review_workflow_config.py`, which is
+    # reviewable; this file is not (see `workflow validation skip` in
+    # GLOSSARY.md).
     if: |
       (github.event_name == 'pull_request'
         && github.event.pull_request.user.login != 'dependabot[bot]'
         && !startsWith(github.event.pull_request.title, 'chore'))
       || (github.event_name == 'issue_comment'
         && github.event.issue.pull_request != null
-        && (contains(github.event.comment.body, '/review')
+        && (startsWith(github.event.comment.body, '/review')
             || contains(github.event.comment.body, '@claude review')))
     runs-on: ubuntu-latest
     permissions:
