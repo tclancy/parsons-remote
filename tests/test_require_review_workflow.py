@@ -120,6 +120,50 @@ def prose(path: Path) -> str:
     return re.sub(r"\s+", " ", path.read_text())
 
 
+def trigger_note(text: str, event: str) -> str:
+    """The commentary inside one `on:` trigger's block, as collapsed prose.
+
+    Slices from `^  <event>:` to that block's own `types:` line, strips the `#`
+    markers and collapses whitespace, so a phrase spanning several comment
+    lines can be matched -- and, the load-bearing half, so a phrase that lives
+    somewhere ELSE in the file cannot satisfy an assertion about this block.
+
+    That is not a hypothetical. The first version of
+    ``test_the_issue_comment_default_branch_limitation_is_recorded`` asserted
+    three substrings against the whole file and all three were already in it
+    before the note existed, so deleting the note left the test green (bot
+    review, PR #26). Driven to a failure in ``TestTheDetectorsCanFail``.
+    """
+    match = re.search(rf"^  {re.escape(event)}:\n((?:.*\n)*?)\s*types: \[", text, re.MULTILINE)
+    assert match, f"no `{event}:` trigger with a `types:` list"
+    uncommented = [re.sub(r"^\s*#\s?", "", line) for line in match.group(1).splitlines()]
+    return re.sub(r"\s+", " ", " ".join(uncommented)).strip()
+
+
+def step_body(text: str, name: str) -> str:
+    """One named step's text, from its `- name:` to the next step's.
+
+    **Every line the fallback step adds is a SECOND spelling of a line the main
+    publish step already has** -- the status context, the `gh api -X POST`, the
+    head-SHA lookup, the `|| true`. So a file-wide `assert "..." in gate` is
+    satisfied by whichever copy the mutation did not touch, and says nothing
+    about the other one. Four mutants survived 89 green tests in bluelinky's
+    copy for exactly this reason, two of them silently restoring the
+    stale-verdict failure the fallback exists to prevent.
+
+    Slice first, then assert inside the slice. Driven to a failure in
+    ``TestTheDetectorsCanFail``.
+    """
+    start = text.index(f"- name: {name}")
+    # `rfind`, not `rindex`: a `- name:` on the very first line has no preceding
+    # newline and `rindex` raises there, which would make this helper blow up
+    # rather than slice. Caught by its own control
+    # (`test_step_body_is_not_fooled_by_a_name_at_a_deeper_indent`).
+    column = start - (text.rfind("\n", 0, start) + 1)
+    nxt = text.find("\n" + " " * column + "- name: ", start + 1)
+    return text[start:] if nxt == -1 else text[start:nxt]
+
+
 @pytest.fixture(scope="module")
 def gate() -> str:
     return GATE_WORKFLOW.read_text()
@@ -170,6 +214,12 @@ class TestTheTriggersCoverEveryWayAVerdictCanChange:
         assert pr_types, "the reviewer declares no pull_request types"
         assert "synchronize" not in pr_types.group(1)
 
+    #: A phrase only the `issue_comment` caveat carries. Pinned as a constant
+    #: so the control in ``TestTheDetectorsCanFail`` asserts against the same
+    #: text the guard does, rather than against a hand-copied duplicate that
+    #: could drift into agreeing with a broken slice.
+    ISSUE_COMMENT_CAVEAT = "ALWAYS executes the copy of the workflow on the **default branch**"
+
     def test_the_issue_comment_default_branch_limitation_is_recorded(self, gate):
         """The `/review` remedy is inert until this file is on the default branch.
 
@@ -182,12 +232,27 @@ class TestTheTriggersCoverEveryWayAVerdictCanChange:
         nothing in this file that can change it -- but a future reader debugging
         a red status that `/review` will not clear needs to find this, and
         `review-gate.jq`'s refusal text points them at `/review` unqualified.
+
+        Asserted against the `issue_comment` block's OWN commentary, not
+        against the file. The first version of this test asked whether
+        `"default branch"`, `"issue_comment"` and `"/review"` appeared anywhere
+        in `require-review.yml` -- and all three already did before the caveat
+        was written: `issue_comment` is the trigger key, `/review` is in the
+        job's `if:`, and "default branch" is in the pre-existing self-grading
+        note. **Deleting the whole caveat left all three true.** Raised by
+        `claude[bot]` on PR #26 and the same can't-fail shape this module had
+        already found and fixed four times.
         """
-        assert "default branch" in gate
-        assert "issue_comment" in gate
-        # The refusal text names `/review`, so the caveat has to be reachable
-        # from the file a reader lands in.
-        assert "/review" in gate
+        note = trigger_note(gate, "issue_comment")
+        assert self.ISSUE_COMMENT_CAVEAT in note, (
+            "the issue_comment trigger must carry the default-branch caveat in its own block"
+        )
+        # The refusal text names `/review`, so the caveat has to say what
+        # happens to `/review` -- and say it where a reader lands.
+        assert "/review" in note
+        # The remedy that DOES work before this file is on `main`. Without it
+        # the caveat states a problem and leaves the reader stuck.
+        assert "re-gate" in note
 
     def test_edited_is_declared_because_the_progress_comment_is_edited_in_place(self, gate):
         issue_comment = re.search(
@@ -197,9 +262,32 @@ class TestTheTriggersCoverEveryWayAVerdictCanChange:
 
 
 class TestTheStatusLandsOnThePrHead:
+    PUBLISH_STEP = "Evaluate the gate and publish the status to the PR head"
+
     def test_it_posts_a_commit_status_rather_than_relying_on_its_own_check(self, gate):
-        assert "statuses/${SHA}" in gate, "the status must be POSTed to the resolved head SHA"
-        assert f'context="{STATUS_CONTEXT}"' in gate
+        step = step_body(gate, self.PUBLISH_STEP)
+        assert "statuses/${SHA}" in step, "the status must be POSTed to the resolved head SHA"
+        # Sliced to the publishing step, not asserted against the file. The
+        # `if: failure()` fallback carries its own `context="..."` line, so the
+        # file-wide version of this assertion was satisfied by that copy --
+        # renaming the context HERE left it green, which publishes the real
+        # verdict under a new context and leaves whatever `dispatch/
+        # require-review` the PR already had standing. Ported from bluelinky
+        # PR #53, where that mutant survived 89 green tests.
+        assert f'context="{STATUS_CONTEXT}"' in step
+
+    def test_both_publishing_sites_agree_on_the_context(self, gate):
+        # The other half of the slice above, and the one that scales: the two
+        # POST sites must name the SAME context, so count them rather than
+        # slicing a third time. Two `gh api -X POST` calls, two contexts; a
+        # third POST added later without a matching context goes red here.
+        active = active_lines(gate)
+        posts = active.count("gh api -X POST")
+        assert posts == 2, f"expected two status POSTs (publish + fallback), found {posts}"
+        assert active.count(f'context="{STATUS_CONTEXT}"') == posts, (
+            "every status POST must publish under the same context; a disagreement "
+            "leaves one of them writing a context nothing reads"
+        )
 
     def test_it_requests_the_permission_that_post_needs(self, gate):
         assert "statuses: write" in gate
@@ -234,8 +322,19 @@ class TestFailureModesPublishSomethingRatherThanNothing:
         # leading `#` leaves the substring in place, and the raw-text version of
         # this assertion reported the disabled trap as present (mutation round,
         # 2026-11-01).
-        assert re.search(r"trap 'publish error", active_lines(gate))
-        assert "|| true" in active_lines(gate), "a failing publish inside the trap must not recurse"
+        trap = re.search(r"trap '(.*)' ERR", active_lines(gate))
+        assert trap, "no ERR trap publishing a status"
+        assert trap.group(1).startswith("publish error"), (
+            f"the ERR trap must publish `error`; it runs {trap.group(1)[:60]!r}"
+        )
+        # Read out of the TRAP's own command, not out of the file. There are
+        # three `|| true` in this workflow -- this one, and two in the
+        # `if: failure()` fallback -- so the file-wide version of this
+        # assertion was satisfied by the fallback's copies and said nothing
+        # about recursion here. Ported from bluelinky PR #53.
+        assert trap.group(1).rstrip().endswith("|| true"), (
+            "a failing publish inside the trap must not recurse"
+        )
 
     def test_the_shell_is_strict_in_every_run_block(self, gate):
         # `active_lines` first: `# set -euo pipefail` leaves the substring in
@@ -599,6 +698,49 @@ class TestTheGateCannotBeSilentlyDisabled:
             "those outputs are empty precisely when the resolve step is what broke"
         )
 
+    def test_the_fallbacks_event_branches_are_not_invertible_silently(self, gate):
+        """Swapping the fallback's `number=` arms makes it publish nothing.
+
+        On an `issue_comment` event `PR_NUMBER` is empty, so the swapped arms
+        set `number=""`, the `pulls/` lookup 404s into its `|| true`, `sha`
+        stays empty and the step exits 0 after a `::warning::` -- leaving the
+        stale verdict standing, which is the one thing this step exists to
+        prevent. It is a two-line edit that no other assertion in this module
+        can see, because both spellings already appear in the resolve step
+        above. Ported from bluelinky PR #53, where it survived 89 green tests.
+
+        Asserted as a LINE SEQUENCE, matching
+        ``test_the_cross_repo_branches_are_not_invertible_silently``: the claim
+        is about which arm each assignment sits in, and a line order says that
+        more plainly than a pattern.
+        """
+        body = [ln.strip() for ln in self._fallback_step(gate).splitlines() if ln.strip()]
+        anchor = 'if [ "$EVENT_NAME" = "issue_comment" ]; then'
+        assert anchor in body, "the fallback does not branch on the event name at all"
+        i = body.index(anchor)
+        assert body[i + 1] == 'number="$ISSUE_NUMBER"', (
+            f"an issue_comment event carries no pull_request object; then-arm is {body[i + 1]!r}"
+        )
+        assert body[i + 2] == "else", f"expected an else at this position, got {body[i + 2]!r}"
+        assert body[i + 3] == 'number="$PR_NUMBER"', (
+            f"a pull_request event's number is on the PR object; else-arm is {body[i + 3]!r}"
+        )
+        # The SHA comes free on the PR events and only there, so it must be set
+        # in the else-arm and nowhere else -- the lookup below is the
+        # issue_comment path's only route to one.
+        assert body[i + 4] == 'sha="$PR_HEAD_SHA"', (
+            f"the PR events' head SHA must be taken from the event; got {body[i + 4]!r}"
+        )
+
+    def test_the_fallback_recovers_a_sha_rather_than_trusting_one_to_exist(self, gate):
+        # The `issue_comment` arm above sets no `sha`, so without this lookup
+        # the fallback has nowhere to post on exactly the event that needed the
+        # resolve step most. `${sha:-}` because `set -u` is on and the variable
+        # is genuinely unset on that path.
+        tail = self._fallback_step(gate)
+        assert 'if [ -z "${sha:-}" ]; then' in tail
+        assert 'sha="$(gh api "repos/${REPO}/pulls/${number}" --jq .head.sha || true)"' in tail
+
     def test_the_fallback_slice_is_the_step_and_not_the_whole_file(self, gate):
         # Control for the slice: one that ran from byte 0 would satisfy the
         # presence assertions above off the main publish step and make the
@@ -699,6 +841,73 @@ class TestTheDetectorsCanFail:
             re.findall(r"startsWith\(github\.event\.pull_request\.title, '([^']+)'\)", synthetic)
         )
         assert found == {"chore", "docs"}, "the detector cannot see a second prefix"
+
+    CAVEAT = TestTheTriggersCoverEveryWayAVerdictCanChange.ISSUE_COMMENT_CAVEAT
+
+    def test_the_trigger_note_slice_reads_the_block_it_is_asked_for(self):
+        # The positive half: a slice that always came back empty would satisfy
+        # every absence assertion about a trigger block.
+        note = trigger_note(
+            "on:\n  issue_comment:\n    # a note spanning\n    # two comment lines\n"
+            "    types: [created, edited]\n",
+            "issue_comment",
+        )
+        assert note == "a note spanning two comment lines"
+
+    def test_the_trigger_note_slice_cannot_be_satisfied_from_another_block(self):
+        """The control for the caveat guard, and the defect it was fixed from.
+
+        The caveat text is planted in the `pull_request` block instead. The
+        file-wide version of that assertion passed on exactly this shape --
+        which is how deleting the whole caveat left the test green on PR #26.
+        """
+        synthetic = (
+            "on:\n"
+            "  pull_request:\n"
+            f"    # {self.CAVEAT}\n"
+            "    types: [opened, synchronize, reopened]\n"
+            "  issue_comment:\n"
+            "    types: [created, edited]\n"
+        )
+        assert self.CAVEAT in synthetic, "the planted caveat is not in the synthetic file at all"
+        assert self.CAVEAT not in trigger_note(synthetic, "issue_comment"), (
+            "the slice reached outside the block it was asked for"
+        )
+
+    def test_the_trigger_note_slice_sees_the_caveat_go_missing(self):
+        # The deletion the real guard has to catch: the block is still there,
+        # the trigger still declares its types, and the commentary is gone.
+        assert self.CAVEAT not in trigger_note(
+            "on:\n  issue_comment:\n    types: [created, edited]\n", "issue_comment"
+        )
+
+    def test_step_body_stops_at_the_next_step(self):
+        synthetic = (
+            "    steps:\n"
+            "      - name: first\n"
+            '        run: echo context="a"\n'
+            "      - name: second\n"
+            '        run: echo context="b"\n'
+        )
+        first = step_body(synthetic, "first")
+        assert 'context="a"' in first
+        assert 'context="b"' not in first, "the slice ran into the following step"
+        assert 'context="b"' in step_body(synthetic, "second")
+
+    def test_step_body_is_not_fooled_by_a_name_at_a_deeper_indent(self):
+        # Control on the indent arithmetic: a `- name:` nested deeper (a matrix
+        # entry, a `with:` list) must not end the slice early.
+        synthetic = (
+            "      - name: outer\n"
+            "        with:\n"
+            "          items:\n"
+            "            - name: inner\n"
+            '        run: echo context="a"\n'
+            "      - name: next\n"
+        )
+        body = step_body(synthetic, "outer")
+        assert 'context="a"' in body, "a deeper `- name:` truncated the slice"
+        assert "- name: next" not in body
 
     def test_the_remedy_spelling_detector_finds_both_spellings(self):
         synthetic = (

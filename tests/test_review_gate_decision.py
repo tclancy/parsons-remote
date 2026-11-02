@@ -155,12 +155,47 @@ def comment(
         "user": {"login": login},
         "body": body,
         "updated_at": updated_at,
+        # Present for the same reason it is on `review()` below: a real issue
+        # comment carries it, and a fixture that omits a field cannot contest a
+        # rule that reads it. The bot-comment arm filters on `bot_logins`
+        # today; this keeps a widening that reaches for the association
+        # falsifiable here too.
+        "author_association": "NONE",
         "created_at": created_at,
     }
 
 
-def review(state: str, *, login: str = "tclancy", submitted_at: str = AFTER_HEAD) -> dict:
-    return {"user": {"login": login}, "state": state, "submitted_at": submitted_at}
+def review(
+    state: str,
+    *,
+    login: str = "tclancy",
+    submitted_at: str = AFTER_HEAD,
+    author_association: str = "NONE",
+) -> dict:
+    """A GitHub review object, carrying every field the real payload carries.
+
+    ``author_association`` defaults to ``"NONE"`` -- the value a real drive-by
+    review carries, and the adversarial one -- because **a fixture that omits a
+    field cannot contest a rule that reads it.**
+
+    bluelinky's copy of this suite paid for that (PR #53). Its `review()`
+    omitted `author_association`, so adding
+    ``or (.author_association != null)`` to the formal-review arm -- the
+    widening someone would plausibly write to admit any
+    OWNER/MEMBER/COLLABORATOR -- **passed all 89 tests**, while a
+    production-shaped payload went straight back to the false green the
+    login allow-list had just closed. Neither mutation round found it: both
+    rounds mutated the code, and the gap was in the fixture.
+
+    Pass `author_association="OWNER"` where the reviewer really is Tom, so the
+    positive case is production-shaped too.
+    """
+    return {
+        "user": {"login": login},
+        "state": state,
+        "submitted_at": submitted_at,
+        "author_association": author_association,
+    }
 
 
 class TestTheBaselineRefuses:
@@ -287,9 +322,46 @@ class TestOnlyAnAllowListedHumanSatisfiesTheFormalArm:
     def test_tom_can(self):
         # The half that makes the two above meaningful: an allow-list that
         # admitted nobody would satisfy them while breaking the escape hatch
-        # `GLOSSARY.md` documents.
-        verdict = run_gate(pr(reviews=[review("APPROVED", login="tclancy")]))
+        # `GLOSSARY.md` documents. `OWNER` because that is what GitHub really
+        # sends for Tom on his own repo.
+        verdict = run_gate(
+            pr(reviews=[review("APPROVED", login="tclancy", author_association="OWNER")])
+        )
         assert verdict["state"] == "success"
+
+    @pytest.mark.parametrize(
+        "association", ["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"]
+    )
+    def test_no_author_association_substitutes_for_the_login_allow_list(self, association):
+        """The rule is the login list, and no payload field may stand in for it.
+
+        This is the fixture-shaped hole from bluelinky PR #53, closed from the
+        other side. Two plausible widenings of the formal-review arm read
+        `author_association` -- `!= null`, and
+        `IN("OWNER","MEMBER","COLLABORATOR")` -- and both reopen the false
+        green this class exists to pin. With the field *absent* from the
+        fixture neither could be contested: `null` fails every comparison, so
+        the suite reported a pass for the wrong reason.
+
+        It also pins the narrowing **as a decision**. A future collaborator's
+        `APPROVED` does not satisfy this gate, which is deliberate while
+        `["tclancy"]` is the whole human population of the repo, and the
+        one-line alternative is named on bluelinky PR #53 and on
+        parsons-remote#26 so Tom can overrule it cheaply. If he does, this test
+        is what goes red and gets rewritten -- which is the point of pinning it
+        rather than leaving it to omission.
+        """
+        verdict = run_gate(
+            pr(
+                reviews=[
+                    review("APPROVED", login="random-passerby", author_association=association)
+                ]
+            )
+        )
+        assert verdict["state"] == "failure", (
+            f"an APPROVED carrying author_association={association!r} from a login that is "
+            "not on `reviewer_logins` satisfied the gate; the allow-list is the rule"
+        )
 
     def test_the_reviewer_list_is_configurable_and_defaults_without_one(self):
         assert run_gate(pr(reviewer_logins=["someone-else"]))["state"] == "failure"
@@ -303,7 +375,7 @@ class TestOnlyAnAllowListedHumanSatisfiesTheFormalArm:
                 "number": 1,
                 "head_committed_at": HEAD_TS,
                 "comments": [],
-                "reviews": [review("APPROVED", login="tclancy")],
+                "reviews": [review("APPROVED", login="tclancy", author_association="OWNER")],
             }
         )
         assert implicit["state"] == "success"
