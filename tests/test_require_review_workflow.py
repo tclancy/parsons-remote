@@ -134,8 +134,20 @@ def trigger_note(text: str, event: str) -> str:
     before the note existed, so deleting the note left the test green (bot
     review, PR #26). Driven to a failure in ``TestTheDetectorsCanFail``.
     """
-    match = re.search(rf"^  {re.escape(event)}:\n((?:.*\n)*?)\s*types: \[", text, re.MULTILINE)
-    assert match, f"no `{event}:` trigger with a `types:` list"
+    # The capture is bounded to BLANK AND COMMENT lines, not to `.*`. With
+    # `(?:.*\n)*?` a trigger whose own `types:` line went missing did not
+    # raise: the non-greedy group walked past this block, past the next
+    # trigger's commentary, and bound to *that* trigger's `types:` -- so the
+    # slice silently answered about the wrong block and the assertion below was
+    # unreachable for every trigger but the last. Found in review of this
+    # commit. Only comments and blanks legitimately sit between an `on:` key
+    # and its `types:`, so requiring that is also the tighter claim.
+    match = re.search(
+        rf"^  {re.escape(event)}:\n((?:[ \t]*(?:#.*)?\n)*?)[ \t]*types: \[",
+        text,
+        re.MULTILINE,
+    )
+    assert match, f"no `{event}:` trigger with a `types:` list directly below its commentary"
     uncommented = [re.sub(r"^\s*#\s?", "", line) for line in match.group(1).splitlines()]
     return re.sub(r"\s+", " ", " ".join(uncommented)).strip()
 
@@ -143,17 +155,27 @@ def trigger_note(text: str, event: str) -> str:
 def step_body(text: str, name: str) -> str:
     """One named step's text, from its `- name:` to the next step's.
 
-    **Every line the fallback step adds is a SECOND spelling of a line the main
-    publish step already has** -- the status context, the `gh api -X POST`, the
-    head-SHA lookup, the `|| true`. So a file-wide `assert "..." in gate` is
-    satisfied by whichever copy the mutation did not touch, and says nothing
-    about the other one. Four mutants survived 89 green tests in bluelinky's
-    copy for exactly this reason, two of them silently restoring the
-    stale-verdict failure the fallback exists to prevent.
+    **The `if: failure()` fallback step re-spells lines the earlier steps
+    already have** -- the status context and the `gh api -X POST` from the
+    publish step, the head-SHA lookup from the resolve step, the `|| true` from
+    the trap. So a file-wide `assert "..." in gate` is satisfied by whichever
+    copy a mutation did not touch, and says nothing about the other one. Four
+    mutants survived 89 green tests in bluelinky's copy for exactly this
+    reason, two of them silently restoring the stale-verdict failure the
+    fallback exists to prevent. (Not *every* line: `set -uo pipefail` and the
+    `::warning::` are the fallback's alone.)
+
+    **Pass `active_lines(text)`, not raw text** -- that is the convention
+    `_fallback_step` documents and this helper does not enforce. Measured in
+    review of this commit: with raw text, commenting out the publish step's
+    `-f context=` line left its slice assertion green. The slice also runs to
+    the *next* `- name:`, so it carries the following step's leading comment
+    block; stripping comments is what makes that harmless.
 
     Slice first, then assert inside the slice. Driven to a failure in
     ``TestTheDetectorsCanFail``.
     """
+    assert f"- name: {name}" in text, f"no step named {name!r}"
     start = text.index(f"- name: {name}")
     # `rfind`, not `rindex`: a `- name:` on the very first line has no preceding
     # newline and `rindex` raises there, which would make this helper blow up
@@ -265,7 +287,10 @@ class TestTheStatusLandsOnThePrHead:
     PUBLISH_STEP = "Evaluate the gate and publish the status to the PR head"
 
     def test_it_posts_a_commit_status_rather_than_relying_on_its_own_check(self, gate):
-        step = step_body(gate, self.PUBLISH_STEP)
+        # `active_lines` first, then slice: raw text leaves a commented-out
+        # `-f context=` line's substring in place and this assertion read it as
+        # present (review of this commit).
+        step = step_body(active_lines(gate), self.PUBLISH_STEP)
         assert "statuses/${SHA}" in step, "the status must be POSTed to the resolved head SHA"
         # Sliced to the publishing step, not asserted against the file. The
         # `if: failure()` fallback carries its own `context="..."` line, so the
@@ -276,15 +301,22 @@ class TestTheStatusLandsOnThePrHead:
         # PR #53, where that mutant survived 89 green tests.
         assert f'context="{STATUS_CONTEXT}"' in step
 
-    def test_both_publishing_sites_agree_on_the_context(self, gate):
-        # The other half of the slice above, and the one that scales: the two
-        # POST sites must name the SAME context, so count them rather than
-        # slicing a third time. Two `gh api -X POST` calls, two contexts; a
-        # third POST added later without a matching context goes red here.
+    def test_every_status_post_site_names_the_same_context(self, gate):
+        # The other half of the slice above, and the one that scales: each
+        # status POST must name the SAME context, so count them rather than
+        # slicing once per site.
+        #
+        # Counted on `statuses/` POSTs specifically, NOT on every
+        # `gh api -X POST`. The looser count was right at two today and would
+        # have gone red on an unrelated future POST -- a comment, a label --
+        # reporting "expected two status POSTs" about a line that posts no
+        # status (review of this commit).
         active = active_lines(gate)
-        posts = active.count("gh api -X POST")
-        assert posts == 2, f"expected two status POSTs (publish + fallback), found {posts}"
-        assert active.count(f'context="{STATUS_CONTEXT}"') == posts, (
+        sites = re.findall(r'gh api -X POST "repos/\$\{REPO\}/statuses/\$\{(?i:sha)\}"', active)
+        assert len(sites) == 2, (
+            f"expected two status POSTs (publish + failure fallback), found {len(sites)}"
+        )
+        assert active.count(f'context="{STATUS_CONTEXT}"') == len(sites), (
             "every status POST must publish under the same context; a disagreement "
             "leaves one of them writing a context nothing reads"
         )
@@ -532,8 +564,11 @@ class TestTheGateCannotBeSilentlyDisabled:
         # same-repo PRs and publish nothing at all. It survived the first
         # mutation round with all 85 tests green, because the only assertion
         # about this step was that a string appeared somewhere in the file.
-        step = gate[gate.index("Is this a cross-repository PR?") :]
-        step = step[: step.index("- name: Evaluate the gate")]
+        # `step_body`, not a hand-rolled pair of `index()` calls: this test and
+        # `test_the_fallbacks_event_branches_are_not_invertible_silently` make
+        # the same kind of claim, so they should share one extractor to drive
+        # to failure rather than two (review of this commit).
+        step = step_body(active_lines(gate), "Is this a cross-repository PR?")
         # Parsed line-by-line rather than with a multiline regex: the thing
         # being asserted is WHICH ARM each assignment sits in, and a line
         # sequence says that more plainly than a pattern.
@@ -691,6 +726,16 @@ class TestTheGateCannotBeSilentlyDisabled:
         assert "-f state=error" in tail
         assert f'context="{STATUS_CONTEXT}"' in tail
         assert "statuses/${sha}" in tail, "the fallback must post to a resolved head SHA"
+        # The fourth of bluelinky PR #53's four surviving guard-step mutants,
+        # and the only one this port had not yet pinned (review of this
+        # commit). Its blast radius here is genuinely small -- this step runs
+        # `set -uo pipefail` with no `-e`, the POST is its last command, and
+        # `if: failure()` means the job is already red -- so the guard is for
+        # the next editor who adds a command after it, at which point a failing
+        # POST would take the step down and publish nothing.
+        assert tail.rstrip().endswith("|| true"), (
+            "the fallback's POST must not be able to fail the step it is rescuing"
+        )
 
     def test_the_fallback_does_not_trust_the_outputs_of_the_step_that_may_have_failed(self, gate):
         tail = self._fallback_step(gate)
@@ -867,12 +912,36 @@ class TestTheDetectorsCanFail:
             f"    # {self.CAVEAT}\n"
             "    types: [opened, synchronize, reopened]\n"
             "  issue_comment:\n"
+            "    # a note of its own, so the assertion below is not satisfied by\n"
+            "    # an empty slice\n"
             "    types: [created, edited]\n"
         )
         assert self.CAVEAT in synthetic, "the planted caveat is not in the synthetic file at all"
-        assert self.CAVEAT not in trigger_note(synthetic, "issue_comment"), (
-            "the slice reached outside the block it was asked for"
+        note = trigger_note(synthetic, "issue_comment")
+        # The reachability half. Without it this test passes on an
+        # always-empty slice, which is the degenerate-input shape this
+        # module's own preamble warns about (review of this commit).
+        assert "a note of its own" in note, "the slice found nothing, so it proves nothing"
+        assert self.CAVEAT not in note, "the slice reached outside the block it was asked for"
+
+    def test_the_trigger_note_slice_refuses_a_block_with_no_types_line(self):
+        """The run-on direction, which the first version could not see.
+
+        With a `(?:.*\\n)*?` capture, a trigger whose `types:` line was
+        deleted did not raise -- the group walked past its own block and bound
+        to the NEXT trigger's `types:`, returning a slice about the wrong
+        block. So the helper's own assertion was unreachable for every trigger
+        but the last one in the file.
+        """
+        synthetic = (
+            "on:\n"
+            "  issue_comment:\n"
+            "    # the caveat still here\n"
+            "  pull_request_review:\n"
+            "    types: [submitted]\n"
         )
+        with pytest.raises(AssertionError, match="no `issue_comment:` trigger"):
+            trigger_note(synthetic, "issue_comment")
 
     def test_the_trigger_note_slice_sees_the_caveat_go_missing(self):
         # The deletion the real guard has to catch: the block is still there,

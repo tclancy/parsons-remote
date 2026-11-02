@@ -38,6 +38,11 @@ HEAD_TS = "2026-10-23T04:00:00Z"
 BEFORE_HEAD = "2026-10-23T03:00:00Z"
 AFTER_HEAD = "2026-10-23T05:00:00Z"
 
+#: The one login on `reviewer_logins`, and `review-gate.jq`'s default for it.
+#: Named once so the fixture default and the association derived from it cannot
+#: drift apart -- the whole hazard `association_for()` below exists to close.
+ALLOW_LISTED_REVIEWER = "tclancy"
+
 #: The exact body prefix of the three real reviews this repo has ever had, on
 #: PR #23 on 2026-10-23. Pinned as live data rather than invented: it is the
 #: only comment shape this repo is known to produce, so if the gate rejected
@@ -133,12 +138,32 @@ def pr(**overrides) -> dict:
     return doc
 
 
+def association_for(login: str) -> str:
+    """The `author_association` GitHub really sends for ``login`` on this repo.
+
+    `OWNER` for Tom, `NONE` for everyone else -- a drive-by reviewer, a fleet
+    bot, an app. Derived rather than defaulted to one literal, because the
+    *adversarial* value and the *production-shaped* value are not the same
+    value, and hardcoding either one gets the other wrong.
+
+    That mattered immediately: a first cut of this defaulted every fixture to
+    `"NONE"`, which made six Tom-shaped success cases assert a payload GitHub
+    cannot send -- an owner with `NONE`. A plausible NARROWING of the gate
+    (`is_bot($reviewers) and (.author_association | IN("OWNER","MEMBER",
+    "COLLABORATOR"))`) would then have turned those six red while production
+    worked fine, which is the mirror image of the defect the field was added to
+    catch. Found in review of this commit.
+    """
+    return "OWNER" if login == ALLOW_LISTED_REVIEWER else "NONE"
+
+
 def comment(
     body: str,
     *,
     login: str = "claude[bot]",
     updated_at: str = AFTER_HEAD,
     created_at: str = BEFORE_HEAD,
+    author_association: str | None = None,
 ) -> dict:
     """A GitHub issue-comment object.
 
@@ -159,8 +184,11 @@ def comment(
         # comment carries it, and a fixture that omits a field cannot contest a
         # rule that reads it. The bot-comment arm filters on `bot_logins`
         # today; this keeps a widening that reaches for the association
-        # falsifiable here too.
-        "author_association": "NONE",
+        # falsifiable here too -- verified in review of this commit against
+        # `select((.user.login | is_bot($bots)) or (.author_association !=
+        # null))`, which turns `totally-unrelated` green with the field present
+        # and survives with it absent.
+        "author_association": author_association or association_for(login),
         "created_at": created_at,
     }
 
@@ -168,33 +196,39 @@ def comment(
 def review(
     state: str,
     *,
-    login: str = "tclancy",
+    login: str = ALLOW_LISTED_REVIEWER,
     submitted_at: str = AFTER_HEAD,
-    author_association: str = "NONE",
+    author_association: str | None = None,
 ) -> dict:
     """A GitHub review object, carrying every field the real payload carries.
 
-    ``author_association`` defaults to ``"NONE"`` -- the value a real drive-by
-    review carries, and the adversarial one -- because **a fixture that omits a
-    field cannot contest a rule that reads it.**
+    ``author_association`` is derived from ``login`` by ``association_for()``
+    unless overridden, because **a fixture that omits a field cannot contest a
+    rule that reads it.**
 
     bluelinky's copy of this suite paid for that (PR #53). Its `review()`
     omitted `author_association`, so adding
     ``or (.author_association != null)`` to the formal-review arm -- the
     widening someone would plausibly write to admit any
     OWNER/MEMBER/COLLABORATOR -- **passed all 89 tests**, while a
-    production-shaped payload went straight back to the false green the
-    login allow-list had just closed. Neither mutation round found it: both
-    rounds mutated the code, and the gap was in the fixture.
+    production-shaped payload went straight back to the false green the login
+    allow-list had just closed. It was found by *review*, not by either
+    mutation round -- and the reason is worth stating precisely, because the
+    obvious reading ("mutation is blind to a fixture gap") would talk the next
+    editor out of a round that works: neither round *included* this mutant.
+    One that does kills it immediately, which is what this commit's own round
+    demonstrates. The lesson is about which mutants you choose to write, not
+    about mutation.
 
-    Pass `author_association="OWNER"` where the reviewer really is Tom, so the
-    positive case is production-shaped too.
+    Override ``author_association`` to drive a value the login would not
+    really carry -- that is what
+    ``test_no_author_association_substitutes_for_the_login_allow_list`` does.
     """
     return {
         "user": {"login": login},
         "state": state,
         "submitted_at": submitted_at,
-        "author_association": author_association,
+        "author_association": author_association or association_for(login),
     }
 
 
@@ -322,11 +356,9 @@ class TestOnlyAnAllowListedHumanSatisfiesTheFormalArm:
     def test_tom_can(self):
         # The half that makes the two above meaningful: an allow-list that
         # admitted nobody would satisfy them while breaking the escape hatch
-        # `GLOSSARY.md` documents. `OWNER` because that is what GitHub really
-        # sends for Tom on his own repo.
-        verdict = run_gate(
-            pr(reviews=[review("APPROVED", login="tclancy", author_association="OWNER")])
-        )
+        # `GLOSSARY.md` documents. `association_for()` gives this fixture the
+        # `OWNER` GitHub really sends for Tom on his own repo.
+        verdict = run_gate(pr(reviews=[review("APPROVED", login=ALLOW_LISTED_REVIEWER)]))
         assert verdict["state"] == "success"
 
     @pytest.mark.parametrize(
@@ -345,11 +377,19 @@ class TestOnlyAnAllowListedHumanSatisfiesTheFormalArm:
 
         It also pins the narrowing **as a decision**. A future collaborator's
         `APPROVED` does not satisfy this gate, which is deliberate while
-        `["tclancy"]` is the whole human population of the repo, and the
-        one-line alternative is named on bluelinky PR #53 and on
-        parsons-remote#26 so Tom can overrule it cheaply. If he does, this test
-        is what goes red and gets rewritten -- which is the point of pinning it
-        rather than leaving it to omission.
+        `["tclancy"]` is the whole human population of the repo. The
+        alternative is one line, stated here rather than cited so the next
+        reader needs nothing but this file::
+
+            select((.user.login | is_bot($reviewers))
+                   or (.author_association
+                       | IN("OWNER", "MEMBER", "COLLABORATOR")))
+
+        It reads the payload instead of a literal and so survives a new
+        collaborator. Raised on bluelinky PR #53 as the trade-off Tom is
+        calibrating; if he takes it, this test is what goes red and gets
+        rewritten, which is the point of pinning it rather than leaving it to
+        omission.
         """
         verdict = run_gate(
             pr(
@@ -375,7 +415,7 @@ class TestOnlyAnAllowListedHumanSatisfiesTheFormalArm:
                 "number": 1,
                 "head_committed_at": HEAD_TS,
                 "comments": [],
-                "reviews": [review("APPROVED", login="tclancy", author_association="OWNER")],
+                "reviews": [review("APPROVED", login=ALLOW_LISTED_REVIEWER)],
             }
         )
         assert implicit["state"] == "success"
@@ -458,7 +498,28 @@ class TestFormalReviews:
         # Every test in this class relies on it. Stated, because if the default
         # drifted off the allow-list they would all go red for a reason that has
         # nothing to do with what they are named for.
-        assert review("APPROVED")["user"]["login"] == "tclancy"
+        assert review("APPROVED")["user"]["login"] == ALLOW_LISTED_REVIEWER
+
+    def test_the_helpers_derive_a_production_shaped_author_association(self):
+        """The default `author_association` is relied on and so is pinned.
+
+        `test_an_arbitrary_github_account_cannot_turn_the_gate_green` and
+        `test_an_unrelated_login_is_refused` depend on the non-allow-listed
+        default being a real non-null value -- that is what makes an
+        association-reading widening *contestable* rather than refused for the
+        wrong reason. And the Tom-shaped cases depend on the owner's being
+        `OWNER`, so a narrowing cannot turn them red while production works.
+        Both directions, both fixtures.
+        """
+        assert association_for(ALLOW_LISTED_REVIEWER) == "OWNER"
+        assert association_for("random-passerby") == "NONE"
+        assert review("APPROVED")["author_association"] == "OWNER"
+        assert review("APPROVED", login="random-passerby")["author_association"] == "NONE"
+        assert comment("x")["author_association"] == "NONE"
+        assert comment("x", login=ALLOW_LISTED_REVIEWER)["author_association"] == "OWNER"
+        # The override still wins, or the parametrized guard below would be
+        # driving the derived value rather than the one it names.
+        assert review("APPROVED", author_association="MEMBER")["author_association"] == "MEMBER"
 
     @pytest.mark.parametrize("state", ["APPROVED", "CHANGES_REQUESTED"])
     def test_a_formal_verdict_satisfies_the_gate(self, state):
