@@ -509,96 +509,148 @@ class TestTheWorkflowValidationSkipStaysDocumented:
         assert "CLAUDE.md" in body
 
 
-#: Real comment bodies from this repo, abridged to the parts the trigger reads:
-#: the opening characters and one `/review` occurrence in context. Every one is
-#: a comment that actually exists, cited so a reader can check the excerpt
-#: against the source rather than trusting it.
+#: Comment bodies from this repo, as VERBATIM slices of the real thing with our
+#: own elision marker between them. Everything outside `ELIDED` is byte-for-byte
+#: what the comment says, so a reader can check an excerpt against the cited
+#: source instead of trusting it — the first draft of these was paraphrased, and
+#: review caught three places where the words had drifted from the API.
+#:
+#: Two slices each, because the trigger reads two things: the opening
+#: characters, and whether `/review` occurs anywhere. The middle is what
+#: neither predicate can see.
 #:
 #: Why real bodies rather than invented ones. The defect below is not that
-#: `contains` is wrong in the abstract -- it is that the comments this repo's
-#: own agents write routinely *mention* `/review`, because the gate's refusal
-#: text instructs them to ("Comment /review on PR #N"). An invented fixture
-#: would have to guess at that, and a guess is what put the bug here.
+#: `contains` is wrong in the abstract — it is that the comments this repo's own
+#: agents write routinely *mention* `/review`, because the gate's refusal text
+#: instructs them to ("Comment /review on PR #N"). An invented fixture would
+#: have to guess at that, and a guess is what put the bug here.
+ELIDED = "\n[... elided ...]\n"
+
 TRIGGER_FIXTURES = (
     (
         # https://github.com/tclancy/parsons-remote/pull/26#issuecomment-6563346201
+        # The one genuine request in the repo's history. Opens with the command.
         "genuine-request-6563346201",
         (
             "/review\n\nRe-requesting a review bound to the current head `64d0784`,"
-            " which carries only the `issue_comment` documentation commit."
+            " which carries only the `issue_comment` documentation commit on top of"
+            " the reviewe"
         ),
         True,
     ),
     (
         # https://github.com/tclancy/parsons-remote/pull/26#issuecomment-6563410273
-        # Fired run 41346706835 for real: the reviewer replied "Your comment is
+        # Fired run 41346706835 for real. The reviewer replied "Your comment is
         # a status report and doesn't ask for a change, so I changed no files
         # and ran nothing."
         "status-report-6563410273",
-        (
-            "## Final state — all green, and the gate proved itself on its own PR\n\n"
-            "- **head `64d0784`** · `OPEN` / `CLEAN` / `MERGEABLE`\n"
-            "… fire `require-review.yml` from a comment, and the `/review` remedy"
-            " its own refusal text names does nothing yet."
-        ),
+        "## Final state — all green, and the gate proved itself on its own PR\n\n"
+        + ELIDED
+        + "hing can fire `require-review.yml` from a comment, and the `/review`"
+        " remedy its own refusal text names is a no-op *on th",
         False,
     ),
     (
         # https://github.com/tclancy/parsons-remote/pull/26#issuecomment-6563348913
-        # The reviewer's OWN output. Latent rather than live -- see
+        # The reviewer's OWN output. Latent rather than live — see
         # `test_the_reviewers_own_output_would_not_re_trigger_it`.
         "reviewer-output-6563348913",
-        (
-            "**Claude finished @metaframework-dispatch-bot[bot]'s task in 15s**"
-            " —— [View job](https://github.com/tclancy/parsons-remote/actions/runs/1)\n\n"
-            'The substrings `"default branch"`, `"issue_comment"` and `"/review"`'
-            " appear *anywhere* in the file."
-        ),
+        "**Claude finished @metaframework-dispatch-bot[bot]'s task in 15s**"
+        " —— [View job](https://github.com/"
+        + ELIDED
+        + ' the substrings `"default branch"`, `"issue_comment"` and `"/review"`'
+        " appear *anywhere* in the workflow file.\n- All thre",
         False,
     ),
     (
-        # The free-form escape hatch, which stays unanchored on purpose. No
-        # comment in this repo has used it yet; it is in the workflow's own
-        # documented contract and in `require-review.yml`'s sibling condition,
-        # so it is pinned here rather than left to the first person to try it.
+        # The free-form escape hatch, which stays unanchored on purpose. Not a
+        # real comment — no comment in this repo has used it yet. It is in the
+        # workflow's own documented contract, so it is pinned here rather than
+        # left to the first person to try it.
         "at-claude-midsentence",
-        "Thanks -- when you get a chance, @claude review the new fixture please.",
+        "Thanks — when you get a chance, @claude review the new fixture please.",
         True,
     ),
     (
-        # A URL-quoting comment, the shape that motivated anchoring. `/reviews`
-        # contains `/review`, so under the old predicate pasting any reviews
-        # endpoint into a comment spawned a reviewer run.
+        # Synthetic. The shape that motivated anchoring: `/reviews` contains
+        # `/review`, so under the old predicate pasting any reviews endpoint
+        # into a comment spawned a reviewer run.
         "quoted-reviews-endpoint",
         "Read it off the thread: `gh api repos/tclancy/parsons-remote/pulls/26/reviews`.",
         False,
     ),
+    (
+        # Synthetic, and it pins a LIMIT rather than a win. Anchoring does not
+        # exclude `/reviews` — that string opens with `/review`, so a comment
+        # that *begins* with a quoted endpoint still fires. The fixture above
+        # reads False because the endpoint is mid-body: position is what the
+        # narrowing buys, not the trailing `s`. Pinned so the workflow comment
+        # cannot quietly start claiming otherwise.
+        "reviews-endpoint-at-the-very-start",
+        "/reviews is the endpoint I read it off.",
+        True,
+    ),
+    (
+        # Synthetic. GitHub's `contains` and `startsWith` are both documented
+        # "not case sensitive", which `fires_reviewer` models by lowercasing
+        # both sides. Nothing else here varies case, so without these two the
+        # modelling half of that function had no coverage at all.
+        "uppercase-request",
+        "/REVIEW please, the head moved.",
+        True,
+    ),
+    (
+        "uppercase-at-claude",
+        "Thanks, @Claude Review this when you can.",
+        True,
+    ),
 )
 
 
-def job_if_block(text: str) -> str:
-    """The `claude-review` job's `if:` expression, and nothing else.
+def job_if_block(text: str, job: str = "claude-review") -> str:
+    """The ``job``-keyed job's ``if:`` expression, and nothing else.
 
-    Extracted by indentation rather than by "everything up to the next key".
-    An earlier draft terminated the match on `^\\s*\\w+:`, which cannot match
-    `runs-on:` -- `\\w+` stops at the hyphen -- so the whole regex failed and the
-    function returned no terms. Returning no terms is the *safe* direction for
-    the fixtures, which is exactly why it had to be caught by a synthetic
-    document: against the real workflow a parser that reads nothing and a
-    workflow with no trigger are the same observation.
+    Two scoping decisions, both of which review showed were unpinned claims in
+    an earlier draft of this helper:
+
+    * **Scoped to the named job.** The first draft took the first ``if:`` in the
+      document and the docstring claimed it was `claude-review`'s. Fed a
+      two-job file with another job above, it returned the wrong one. Nothing
+      failed, because the direction happens to be safe here — the `terms`
+      fixture turns an empty result red — but a guarantee the code does not
+      provide is worse than no guarantee.
+    * **Terminated by indentation.** `^\\s*\\w+:` cannot match `runs-on:` —
+      `\\w+` stops at the hyphen — so an earlier regex form matched nothing and
+      silently returned no terms. Deleting the terminator entirely also left
+      the suite green, which is the *unsafe* direction: over-capture would
+      admit a `contains(github.event.comment.body, ...)` written in a later
+      job, or in a commented-out alternative further down the file.
+
+    Returns `""` when the job or its `if:` is absent, which
+    `issue_comment_trigger_terms` turns into no terms and the `terms` fixture
+    turns into a failure.
     """
     lines = text.splitlines()
-    for i, line in enumerate(lines):
-        match = re.match(r"^(\s*)if:(.*)$", line)
+    for start_index, line in enumerate(lines):
+        match = re.match(rf"^(\s*){re.escape(job)}:\s*$", line)
         if not match:
             continue
-        indent, inline = match.group(1), match.group(2)
-        body = [inline]
-        for following in lines[i + 1 :]:
-            if following.strip() and not following.startswith(indent + " "):
+        job_indent = match.group(1)
+        for offset, inner in enumerate(lines[start_index + 1 :]):
+            # Out of this job's block entirely: a non-blank line at or left of
+            # the job key's own indentation.
+            if inner.strip() and not inner.startswith(job_indent + " "):
                 break
-            body.append(following)
-        return "\n".join(body)
+            key = re.match(r"^(\s*)if:(.*)$", inner)
+            if not key:
+                continue
+            if_indent, inline = key.group(1), key.group(2)
+            body = [inline]
+            for following in lines[start_index + offset + 2 :]:
+                if following.strip() and not following.startswith(if_indent + " "):
+                    break
+                body.append(following)
+            return "\n".join(body)
     return ""
 
 
@@ -681,7 +733,7 @@ class TestOnlyAnActualReviewRequestFiresTheReviewer:
     with the command.
     """
 
-    @pytest.mark.parametrize("name,body,expected", [(f[0], f[1], f[2]) for f in TRIGGER_FIXTURES])
+    @pytest.mark.parametrize("name,body,expected", TRIGGER_FIXTURES)
     def test_each_measured_comment_shape_gets_the_right_verdict(
         self, name: str, body: str, expected: bool, terms: list[tuple[str, str]]
     ):
@@ -722,10 +774,18 @@ class TestOnlyAnActualReviewRequestFiresTheReviewer:
 
         Anchoring is a real narrowing -- `startsWith` does not trim, so a body
         beginning with a blank line or a courtesy sentence misses. `@claude
-        review` mid-sentence is the remedy for that, and `require-review.yml`
-        admits both spellings for the same reason, so dropping this one would
-        leave the two halves of the gate disagreeing about what asks for a
-        review.
+        review` mid-sentence is the remedy for that.
+
+        On the symmetry with the gate's other half, stated precisely because an
+        earlier draft of this docstring overclaimed it: `require-review.yml`
+        (arriving on PR #26) admits both spellings with `contains`, so after
+        this change the two halves agree on `@claude review` and are
+        DELIBERATELY asymmetric on `/review` — a mid-body mention re-fires the
+        free jq gate and not the billable reviewer. That is the benign
+        direction, and #26's own comment on the subject needs a follow-up to
+        say so. Dropping this term would make the halves disagree in the
+        expensive direction instead: `@claude review` running the reviewer with
+        no status to show for it.
         """
         operators = {operator for operator, literal in terms if literal == "@claude review"}
         assert operators == {"contains"}, (
@@ -748,8 +808,15 @@ class TestOnlyAnActualReviewRequestFiresTheReviewer:
         `require-review.yml` must listen to `[created, edited]` to see a review
         finish at all, so "add `edited` here too" is a natural future edit --
         and under `contains` it would make every review the bot posts spawn
-        another review. Anchoring defuses that in advance: the bot's output
+        another review. Anchoring defuses that for `/review`: the bot's output
         opens with `**Claude finished`.
+
+        It does NOT defuse it for `@claude review`, which stays on `contains`
+        by design — so a reviewer comment that quotes the escape hatch would
+        still loop. Latent twice over (no `claude[bot]` body in this repo
+        contains that string, and `edited` is not a trigger here), but this
+        very file is now dense with the literal, which is exactly what a
+        reviewer summarising it would quote back.
         """
         reviewer_output = next(
             body for name, body, _ in TRIGGER_FIXTURES if name.startswith("reviewer-output")
@@ -764,8 +831,20 @@ class TestOnlyAnActualReviewRequestFiresTheReviewer:
         """The `# Run when:` block above the `if:` is the first thing a reader
         sees, and it said "a comment ... explicitly asks for `/review`" while
         the condition matched any mention. Prose and condition had to disagree
-        for the bug to survive being read."""
-        assert "opens with `/review`" in prose(WORKFLOW)
+        for the bug to survive being read.
+
+        BOTH HALVES. Asserting only that the new phrase is present left the
+        file's own header, 51 lines above, still reading "a comment containing
+        `/review`" — the pre-fix rule, shipped green beside the fix, which is
+        the exact defect this guard exists to prevent. Review caught it. A
+        presence assertion cannot see a contradiction; the absence one can.
+        """
+        body = prose(WORKFLOW)
+        assert "opens with `/review`" in body
+        assert "comment containing `/review`" not in body, (
+            "the header still states the pre-fix rule — `contains` and "
+            "`startsWith` cannot both be what this workflow does"
+        )
 
 
 class TestTheTriggerGuardsReadTheRightCondition:
@@ -792,6 +871,57 @@ class TestTheTriggerGuardsReadTheRightCondition:
         """)
         assert issue_comment_trigger_terms(document) == [("contains", "/review")]
 
+    def test_the_arm_order_does_not_decide_which_condition_is_read(self):
+        """The reversed-arms case, and it is what makes the test above mean
+        something.
+
+        Mutation showed the two scoping mechanisms shield each other: with the
+        `pull_request` arm written FIRST, slicing from the `issue_comment`
+        marker has already dropped the title check before the field regex runs
+        — so widening the regex's field to `[A-Za-z0-9_.]+` left the whole
+        suite green, and so did deleting the slice while keeping the field
+        scoping. Each mechanism was proved only in the one arm order where the
+        other covers for it. This document removes that cover.
+        """
+        document = textwrap.dedent("""\
+            jobs:
+              claude-review:
+                if: |
+                  (github.event_name == 'issue_comment'
+                    && startsWith(github.event.comment.body, '/review'))
+                  || (github.event_name == 'pull_request'
+                    && !startsWith(github.event.pull_request.title, 'chore'))
+                runs-on: ubuntu-latest
+        """)
+        assert issue_comment_trigger_terms(document) == [("startsWith", "/review")]
+
+    def test_a_comment_body_term_before_the_marker_is_not_counted(self):
+        """The marker slice, which had no test and survived being deleted.
+
+        Once `job_if_block` became job-scoped, field scoping alone was enough
+        for the real workflow — the `pull_request` arm references
+        `github.event.pull_request.*` and nothing else, so slicing from the
+        `issue_comment` marker changed no observable result and a mutant that
+        removed it passed the whole suite. A defensive guard nothing can reach
+        is not a guard; this document reaches it.
+
+        The shape is a `github.event.comment.body` reference on the
+        `pull_request` arm. That is itself a bug — a `pull_request` payload has
+        no `comment` — but it is the kind of bug a copy-paste between the two
+        arms produces, and it must not be read back as the comment trigger.
+        """
+        document = textwrap.dedent("""\
+            jobs:
+              claude-review:
+                if: |
+                  (github.event_name == 'pull_request'
+                    && contains(github.event.comment.body, 'legacy-decoy'))
+                  || (github.event_name == 'issue_comment'
+                    && startsWith(github.event.comment.body, '/review'))
+                runs-on: ubuntu-latest
+        """)
+        assert issue_comment_trigger_terms(document) == [("startsWith", "/review")]
+
     def test_a_missing_issue_comment_arm_returns_no_terms(self):
         """Empty, not "nothing to check". The `terms` fixture turns that into a
         failure; returning a permissive default would make a deleted trigger
@@ -813,3 +943,75 @@ class TestTheTriggerGuardsReadTheRightCondition:
         body = "## Status\n\nthe `/review` remedy is named in the refusal text."
         assert fires_reviewer(body, [("contains", "/review")]) is True
         assert fires_reviewer(body, [("startsWith", "/review")]) is False
+
+
+class TestTheIfBlockExtractorIsScopedBothWays:
+    """`job_if_block`'s two stated properties, each driven to failure.
+
+    Both were unpinned until review probed them: deleting the indentation
+    terminator so the function returns the rest of the document left the suite
+    green, and so did reading the first `if:` in the file regardless of which
+    job owns it. Over-capture is the unsafe direction — it would admit a
+    `contains(github.event.comment.body, ...)` from a later job or from a
+    commented-out alternative — so it gets a test that fails on it.
+    """
+
+    TWO_JOBS = textwrap.dedent("""\
+        jobs:
+          notify:
+            if: contains(github.event.comment.body, 'ping')
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo hi
+          claude-review:
+            if: |
+              (github.event_name == 'issue_comment'
+                && startsWith(github.event.comment.body, '/review'))
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo review
+        later-top-level-key:
+          note: contains(github.event.comment.body, 'decoy')
+    """)
+
+    def test_it_reads_the_named_job_and_not_the_first_if_in_the_file(self):
+        """`notify:` is written first and carries a comment-body condition.
+
+        An unscoped extractor returns `notify:`'s, and
+        `issue_comment_trigger_terms` then reports `[]` — which the `terms`
+        fixture turns red, so the direction is safe but the docstring's
+        guarantee was fiction. This asserts the guarantee.
+        """
+        block = job_if_block(self.TWO_JOBS)
+        assert "startsWith(github.event.comment.body, '/review')" in block
+        assert "'ping'" not in block
+
+    def test_it_stops_at_the_end_of_the_if_block(self):
+        """The indentation walk, which had no test at all.
+
+        `steps:` sits at the same indentation as `if:`, and
+        `later-top-level-key:` is further out still. Both must be excluded, or
+        a decoy written anywhere below the job would be read as part of the
+        trigger.
+        """
+        block = job_if_block(self.TWO_JOBS)
+        assert "steps:" not in block
+        assert "'decoy'" not in block
+        assert issue_comment_trigger_terms(self.TWO_JOBS) == [("startsWith", "/review")]
+
+    def test_an_absent_job_yields_no_block(self):
+        """Empty rather than a fallback to whatever `if:` is nearest."""
+        assert job_if_block(self.TWO_JOBS, job="no-such-job") == ""
+
+    def test_an_if_as_the_jobs_last_key_still_terminates(self):
+        """No following key to stop on. The loop must fall off the end of the
+        document rather than depend on one being there."""
+        document = textwrap.dedent("""\
+            jobs:
+              claude-review:
+                runs-on: ubuntu-latest
+                if: |
+                  (github.event_name == 'issue_comment'
+                    && startsWith(github.event.comment.body, '/review'))
+        """)
+        assert issue_comment_trigger_terms(document) == [("startsWith", "/review")]
