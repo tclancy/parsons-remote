@@ -234,3 +234,10 @@ tags
 
 # uv pins the interpreter here; it is reproducibility input, not local state.
 !.python-version
+
+# Agent scratch space. `metaframework/agent.md` directs autonomous sessions to
+# write probe scripts and mutation harnesses to `.scratch/` inside their own
+# worktree *on the understanding that it is gitignored*. It was not, in this
+# repo, until a `git add -A` in the 2026-11-01 day shift staged a copied
+# mutation harness and put it in front of the repo's own ruff gate.
+.scratch/
