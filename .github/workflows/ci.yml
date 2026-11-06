@@ -35,6 +35,15 @@ jobs:
         run: |
           out="$(uv run radon cc scripts/ -n C)"
           if [ -n "$out" ]; then echo "$out"; exit 1; fi
+      - name: Prove jq is available
+        # `tests/test_review_gate_decision.py` evaluates `.github/review-gate.jq`
+        # by shelling out to jq, and `require-review.yml` depends on jq being on
+        # the runner. ubuntu-latest ships it, but "ships it today" is not a
+        # guarantee: this step makes its absence a one-line red instead of a
+        # confusing failure 40 tests deep, and it is what
+        # `tests/test_require_review_workflow.py::test_ci_proves_jq_is_available`
+        # pins so the dependency cannot be dropped silently.
+        run: jq --version
       - name: Run tests
         run: uv run pytest
       - name: Shellcheck the release scripts
