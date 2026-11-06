@@ -3,7 +3,7 @@ name: Claude Code Review
 # Steady-state burn reduction (#320 §5):
 #   - Auto-trigger on `opened` only (was: opened + synchronize). A 10-commit PR
 #     used to fire 10 model reviews; now it fires one. Re-review on demand by
-#     leaving a comment containing `/review` (or `@claude review`).
+#     leaving a comment that opens with `/review`, or mentions `@claude review`.
 #   - Skip Dependabot and `chore` PRs entirely (closes #314).
 
 on:
@@ -39,14 +39,31 @@ jobs:
   claude-review:
     # Run when:
     #   - PR opened by a non-Dependabot author with a non-`chore` title, OR
-    #   - a comment on a PR explicitly asks for `/review` or `@claude review`.
+    #   - a comment on a PR opens with `/review`, or mentions `@claude review`.
+    #
+    # `startsWith` and not `contains` on `/review`: a comment that merely
+    # MENTIONS the remedy is not a request for one, and this repo's comments
+    # mention it constantly because the gate's own refusal text says "Comment
+    # /review on PR #N". Measured 2026-11-02 over every `issue_comment` run of
+    # this workflow: two passed this filter, and one of the two (run
+    # 41346706835) was a status report titled "## Final state - all green"
+    # whose only tie to a review was the word in prose. The reviewer spawned
+    # and answered that it had been asked for nothing. Any MID-BODY quoted
+    # reviews endpoint matched too, `/reviews` being a superstring -- though
+    # note anchoring does not exclude `/reviews`, only move it: a comment that
+    # OPENS with one still fires, which is pinned as a fixture rather than
+    # claimed away. `@claude review` stays unanchored as the free-form escape
+    # hatch, since `startsWith` does not trim. The reasoning
+    # and the fixtures are in `tests/test_review_workflow_config.py`, which is
+    # reviewable; this file is not (see `workflow validation skip` in
+    # GLOSSARY.md).
     if: |
       (github.event_name == 'pull_request'
         && github.event.pull_request.user.login != 'dependabot[bot]'
         && !startsWith(github.event.pull_request.title, 'chore'))
       || (github.event_name == 'issue_comment'
         && github.event.issue.pull_request != null
-        && (contains(github.event.comment.body, '/review')
+        && (startsWith(github.event.comment.body, '/review')
             || contains(github.event.comment.body, '@claude review')))
     runs-on: ubuntu-latest
     permissions:
